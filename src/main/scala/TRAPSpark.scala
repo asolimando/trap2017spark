@@ -58,8 +58,11 @@ object TRAPSpark extends Helper {
 
     println("Tot rows: " + df.count)
 
-    println(df.groupBy("plate").agg(countDistinct("nationality").as("num_nat")).filter(col("num_nat") > 1).count)
+    val multiNat = df.groupBy("plate").agg(countDistinct("nationality").as("num_nat")).filter(col("num_nat") > 1)
 
+    println(multiNat.count)
+
+    multiNat.filter(!array_contains(col("nats"),"?")).show
 //    df.describe().show()
 
     val plateDistinctGates = df.groupBy("plate").agg(countDistinct("gate", "lane"))
