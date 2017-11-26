@@ -49,14 +49,27 @@ object TRAPSpark extends Helper {
 
     spark.sparkContext.setLogLevel("ERROR")
 
-    val df = getRawData(spark).filter(col("nationality").isNotNull && length(col("nationality")) <= 3)
+    val df = getRawData(spark)
+      .filter(col("nationality").isNotNull && length(col("nationality")) <= 3)
+      .withColumn("timestamp", unix_timestamp(col("timestamp")))
+      .cache
 
     df.show(false)
 
-    df.describe().show()
+    println("Tot rows: " + df.count)
 
-    df.groupBy("nationality").count().show()
+    println(df.groupBy("plate").agg(countDistinct("nationality").as("num_nat")).filter(col("num_nat") > 1).count)
 
+//    df.describe().show()
+
+    val plateDistinctGates = df.groupBy("plate").agg(countDistinct("gate", "lane"))
+
+    plateDistinctGates.show(false)
+
+    val nationalityCount = df.groupBy("nationality").count
+
+    nationalityCount.show(false)
+   /*
     val formula = new RFormula()
       .setFormula("label ~ .")
       .setFeaturesCol(FEATURES_COLNAME)
@@ -65,6 +78,7 @@ object TRAPSpark extends Helper {
     vetorized.show(false)
 
     computeKMeans(vetorized, spark)
+    */
   }
 
   def computeKMeans(df: DataFrame, spark: SparkSession) = {
