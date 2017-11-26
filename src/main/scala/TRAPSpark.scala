@@ -49,7 +49,7 @@ object TRAPSpark extends Helper {
 
     spark.sparkContext.setLogLevel("ERROR")
 
-    val df = getRawData(spark).filter(length(col("nationality")) > 3)
+    val df = getRawData(spark).filter(length(col("nationality")) <= 3)
 
     df.show(false)
 
