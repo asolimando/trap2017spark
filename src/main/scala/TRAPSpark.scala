@@ -3,6 +3,8 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import java.io.File
 
+import org.apache.spark.ml.clustering.KMeans
+import org.apache.spark.ml.feature._
 
 trait Helper {
   val CSV_INPUT = "data/all.csv"
@@ -10,6 +12,8 @@ trait Helper {
 
   val WHLOCATION = "spark-warehouse"
   val LOCALDIR = "tmpdir"
+
+  val FEATURES_COLNAME = "features"
 }
 
 object TRAPSpark extends Helper {
@@ -43,13 +47,42 @@ object TRAPSpark extends Helper {
       .master("local[*]")
       .getOrCreate()
 
-    val df = getRawData(spark)
+    spark.sparkContext.setLogLevel("ERROR")
+
+    val df = getRawData(spark).filter(length(col("nationality")) > 3)
 
     df.show(false)
 
     df.describe().show()
 
     df.groupBy("nationality").count().show()
+
+    val formula = new RFormula()
+      .setFormula("label ~ .")
+      .setFeaturesCol(FEATURES_COLNAME)
+
+    val vetorized = formula.fit(df).transform(df)
+    vetorized.show(false)
+
+    computeKMeans(vetorized, spark)
+  }
+
+  def computeKMeans(df: DataFrame, spark: SparkSession) = {
+    val numClusters = 2
+    val numIterations = 20
+    val kmeans = new KMeans()
+      .setFeaturesCol(FEATURES_COLNAME)
+      .setMaxIter(numIterations)
+      .setK(numClusters)
+      .fit(df)
+
+    // Evaluate clustering by computing Within Set Sum of Squared Errors
+    val clusters = kmeans.transform(df)
+    println("Cost = " + kmeans.computeCost(df) +
+      "\nSummary = " + kmeans.summary.clusterSizes.mkString(", "))
+
+    // Save and load model
+    kmeans.write.overwrite.save("data/model/kmeans.model")
   }
 
 }
