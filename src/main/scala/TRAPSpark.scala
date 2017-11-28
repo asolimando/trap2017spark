@@ -51,12 +51,17 @@ object TRAPSpark extends Helper {
 
     val df = getRawData(spark)
       .filter(col("nationality").isNotNull && length(col("nationality")) <= 3)
-      .withColumn("timestamp", unix_timestamp(col("timestamp")))
+//      .withColumn("timestamp", unix_timestamp(col("timestamp")))
       .cache
 
     df.show(false)
 
     println("Tot rows: " + df.count)
+
+    val conflicts = df.groupBy("gate", "lane", "timestamp").agg(countDistinct("plate").as("plates")).filter(col("plates") > 1)
+
+    println(conflicts.count)
+    conflicts.show()
 
     val multiNat = df.groupBy("plate").agg(countDistinct("nationality").as("num_nat")).filter(col("num_nat") > 1)
 
