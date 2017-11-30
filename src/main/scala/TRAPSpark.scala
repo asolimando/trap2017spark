@@ -1,4 +1,4 @@
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import java.io.File
@@ -9,6 +9,14 @@ import org.apache.spark.ml.feature._
 trait Helper {
   val CSV_INPUT = "data/all.csv"
   val PARQUET_DATA = "data/raw.parquet"
+
+  val CONFLICTS_DATA = "data/conflicts.parquet"
+
+  val MULTINAT_DATA = "data/multinat.parquet"
+
+  val FIXABLE_MULTINAT_DATA = "data/fixablemultinat.parquet"
+
+  val FIXED_DATA = "data/fixed.parquet"
 
   val WHLOCATION = "spark-warehouse"
   val LOCALDIR = "tmpdir"
@@ -30,11 +38,79 @@ object TRAPSpark extends Helper {
         .option("timestampFormat", "yyyy-MM-dd HH:mm:ss")
         .csv(CSV_INPUT)
         .toDF("plate", "gate", "lane", "timestamp", "nationality")
+        .distinct
 
       csv.write.parquet(PARQUET_DATA)
     }
 
-    spark.read.parquet(PARQUET_DATA)
+    readParquet(spark, PARQUET_DATA)
+  }
+
+  def writeParquet(df: DataFrame, path: String) = df.write.parquet(path)
+
+  def readParquet(spark: SparkSession, path: String): DataFrame = spark.read.parquet(path)
+
+  def getMultinatDF(spark: SparkSession, df: DataFrame): DataFrame ={
+    if(new File(MULTINAT_DATA).isDirectory)
+      readParquet(spark, MULTINAT_DATA)
+    else {
+      val res = df.groupBy("plate")
+        .agg(collect_set("nationality").as("nats"), countDistinct("nationality").as("num_nat"))
+        .filter(col("num_nat") > 1)
+        .withColumn("nats", sort_array(col("nats")))
+
+      writeParquet(res, MULTINAT_DATA)
+
+      res
+    }
+  }
+
+  def getConflictsDF(spark: SparkSession, df: DataFrame): DataFrame ={
+    if(new File(CONFLICTS_DATA).isDirectory)
+      readParquet(spark, CONFLICTS_DATA)
+    else{
+      val res = df.groupBy("gate", "lane", "timestamp")
+        .agg(countDistinct("plate").as("plates"))
+        .filter(col("plates") > 1)
+
+      writeParquet(res, CONFLICTS_DATA)
+
+      res
+    }
+  }
+
+  def getFixableMultiNatDF(spark: SparkSession, df: Dataset[Row]) = {
+    if(new File(FIXABLE_MULTINAT_DATA).isDirectory)
+      readParquet(spark, FIXABLE_MULTINAT_DATA)
+    else {
+      val res = df.filter(col("num_nat") === 2 && array_contains(col("nats"),"?"))
+        .withColumn("real_nat", col("nats")(1))
+        .select("plate", "real_nat")
+
+      writeParquet(res, FIXABLE_MULTINAT_DATA)
+
+      res
+    }
+  }
+
+  def getFixedData(spark: SparkSession, df: DataFrame, fixableMultiNat: DataFrame, path: String) = {
+    if(new File(FIXED_DATA).isDirectory)
+      readParquet(spark, FIXED_DATA)
+    else {
+      val totRows = df.count
+
+      println(df.filter(col("nationality") === "?").count + "/" + totRows + " entries with unknown nationalities")
+
+      val fixed = df.join(fixableMultiNat, df("plate") === fixableMultiNat("plate"))
+        .withColumn("nationality", col("real_nat"))
+
+      println(fixed.filter(col("nationality") === "?").count + "/" + totRows +
+        " entries with unknown nationalities after sanitization")
+
+      writeParquet(fixed, FIXED_DATA)
+
+      fixed
+    }
   }
 
   def main(args: Array[String]) {
@@ -56,24 +132,28 @@ object TRAPSpark extends Helper {
 
     df.show(false)
 
-    println("Tot rows: " + df.count)
+    val totRows = df.count
 
-    val conflicts = df.groupBy("gate", "lane", "timestamp").agg(countDistinct("plate").as("plates")).filter(col("plates") > 1)
+    println("Tot rows: " + totRows)
+
+    val conflicts = getConflictsDF(spark, df)
 
     println(conflicts.count)
     conflicts.show()
 
-    val multiNat = df.groupBy("plate").agg(countDistinct("nationality").as("num_nat")).filter(col("num_nat") > 1)
+    val multiNat = getMultinatDF(spark, df)
 
     println(multiNat.count)
 
-    multiNat.filter(!array_contains(col("nats"),"?")).show
-//    df.describe().show()
+    val fixableMultiNat = getFixableMultiNatDF(spark, multiNat)
 
+    val fixed = getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
+
+    /*
     val plateDistinctGates = df.groupBy("plate").agg(countDistinct("gate", "lane"))
 
     plateDistinctGates.show(false)
-
+*/
     val nationalityCount = df.groupBy("nationality").count
 
     nationalityCount.show(false)
