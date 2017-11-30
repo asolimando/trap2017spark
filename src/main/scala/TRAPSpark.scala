@@ -2,9 +2,15 @@ import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import java.io.File
+import java.sql.Timestamp
 
-import org.apache.spark.ml.clustering.KMeans
+import org.apache.spark.ml.{Pipeline, PipelineModel}
+import org.apache.spark.ml.classification.{DecisionTreeClassificationModel, RandomForestClassifier}
+import org.apache.spark.ml.clustering.{KMeans, KMeansModel}
+import org.apache.spark.ml.evaluation.RegressionEvaluator
 import org.apache.spark.ml.feature._
+import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+import org.joda.time.DateTime
 
 trait Helper {
   val CSV_INPUT = "data/all.csv"
@@ -103,6 +109,8 @@ object TRAPSpark extends Helper {
 
       val fixed = df.join(fixableMultiNat, df("plate") === fixableMultiNat("plate"))
         .withColumn("nationality", col("real_nat"))
+        .drop(fixableMultiNat("plate"))
+        .drop(fixableMultiNat("real_nat"))
 
       println(fixed.filter(col("nationality") === "?").count + "/" + totRows +
         " entries with unknown nationalities after sanitization")
@@ -125,39 +133,63 @@ object TRAPSpark extends Helper {
 
     spark.sparkContext.setLogLevel("ERROR")
 
-    val df = getRawData(spark)
-      .filter(col("nationality").isNotNull && length(col("nationality")) <= 3)
-//      .withColumn("timestamp", unix_timestamp(col("timestamp")))
-      .cache
+    var df =
+      if(new File(FIXED_DATA).isDirectory)
+        readParquet(spark, FIXED_DATA)
+      else {
+        val df = getRawData(spark)
+          .filter(col("nationality").isNotNull && length(col("nationality")) <= 3)
+        //      .withColumn("timestamp", unix_timestamp(col("timestamp")))
 
-    df.show(false)
+        df.show(false)
 
-    val totRows = df.count
+        val totRows = df.count
 
-    println("Tot rows: " + totRows)
+        println("Tot rows: " + totRows)
 
-    val conflicts = getConflictsDF(spark, df)
+        val conflicts = getConflictsDF(spark, df)
 
-    println(conflicts.count)
-    conflicts.show()
+        println(conflicts.count)
+        conflicts.show(false)
 
-    val multiNat = getMultinatDF(spark, df)
+        val multiNat = getMultinatDF(spark, df)
 
-    println(multiNat.count)
+        multiNat.show(false)
 
-    val fixableMultiNat = getFixableMultiNatDF(spark, multiNat)
+        println(multiNat.count)
 
-    val fixed = getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
+        val fixableMultiNat = getFixableMultiNatDF(spark, multiNat)
 
-    /*
-    val plateDistinctGates = df.groupBy("plate").agg(countDistinct("gate", "lane"))
+        fixableMultiNat.show(false)
 
-    plateDistinctGates.show(false)
-*/
+        getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
+      }
+
     val nationalityCount = df.groupBy("nationality").count
-
     nationalityCount.show(false)
-   /*
+
+    val dayOfWeekUDF = udf((ts: Timestamp) => new DateTime(ts).dayOfWeek.getAsString)
+
+    df = df.withColumn("month", month(col("timestamp")))
+           .withColumn("day", dayofmonth(col("timestamp")))
+           .withColumn("hour", hour(col("timestamp")))
+           .withColumn("dayofweek", dayOfWeekUDF(col("timestamp")))
+
+    df = df.groupBy("plate", "nationality").agg(
+      countDistinct("gate").as("num_gates"),
+      countDistinct("lane").as("num_lanes"),
+      countDistinct("gate", "lane").as("num_gatelane"),
+      countDistinct("month").as("num_months"),
+      countDistinct("day").as("num_days"),
+      countDistinct("hour").as("num_hours"),
+      countDistinct("dayofweek").as("num_daysofweek"),
+      countDistinct("timestamp").as("num_seen"),
+      min("month").as("min_month"),
+      max("month").as("max_month"),
+      min("timestamp").as("min_time"),
+      max("timestamp").as("max_time")
+    )
+
     val formula = new RFormula()
       .setFormula("label ~ .")
       .setFeaturesCol(FEATURES_COLNAME)
@@ -166,22 +198,37 @@ object TRAPSpark extends Helper {
     vetorized.show(false)
 
     computeKMeans(vetorized, spark)
-    */
+  }
+
+  def computeBestKMeans(df: DataFrame,
+                        numIterations: Int = 20,
+                        kVals: Seq[Int] = Seq(2, 3, 4, 5, 10, 20, 30, 40)): KMeansModel ={
+
+    val Array(train, test) = df.randomSplit(Array(0.7, 0.3))
+    val costs = kVals.map { k =>
+      val model = new KMeans()
+        .setK(k)
+        .setMaxIter(numIterations)
+        .fit(train)
+      (k, model, model.computeCost(test))
+    }
+    println("Clustering cross-validation:")
+    costs.foreach { case (k, model, cost) => println(f"WCSS for K=$k id $cost%2.2f") }
+
+    val best = costs.minBy(_._3)
+    println("Best model with k = " + best._1)
+
+    best._2
   }
 
   def computeKMeans(df: DataFrame, spark: SparkSession) = {
-    val numClusters = 2
-    val numIterations = 20
-    val kmeans = new KMeans()
-      .setFeaturesCol(FEATURES_COLNAME)
-      .setMaxIter(numIterations)
-      .setK(numClusters)
-      .fit(df)
+    val Array(training, test) = df.randomSplit(Array(0.7, 0.3))
+    val kmeans = computeBestKMeans(training)
 
     // Evaluate clustering by computing Within Set Sum of Squared Errors
-    val clusters = kmeans.transform(df)
-    println("Cost = " + kmeans.computeCost(df) +
-      "\nSummary = " + kmeans.summary.clusterSizes.mkString(", "))
+    val clusters = kmeans.transform(test)
+    println(//"Cost = " + kmeans.computeCost(test) + "\n" +
+      "Summary = " + kmeans.summary.clusterSizes.mkString(", "))
 
     // Save and load model
     kmeans.write.overwrite.save("data/model/kmeans.model")
