@@ -1,15 +1,11 @@
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types._
 import java.io.File
 import java.sql.Timestamp
 
-import org.apache.spark.ml.{Pipeline, PipelineModel}
-import org.apache.spark.ml.classification.{DecisionTreeClassificationModel, RandomForestClassifier}
-import org.apache.spark.ml.clustering.{KMeans, KMeansModel}
-import org.apache.spark.ml.evaluation.RegressionEvaluator
+import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature._
-import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+import org.apache.spark.mllib.linalg.VectorUDT
 import org.joda.time.DateTime
 
 trait Helper {
@@ -197,10 +193,11 @@ object TRAPSpark extends Helper {
     val vetorized = formula.fit(df).transform(df)
     vetorized.show(false)
 
-    computeKMeans(vetorized, spark)
+    computeClusters(vetorized, spark, "gmm")
+    computeClusters(vetorized, spark, "kmeans")
   }
 
-  def computeBestKMeans(df: DataFrame,
+  def computeKMeans(df: DataFrame,
                         numIterations: Int = 20,
                         kVals: Seq[Int] = Seq(2, 3, 4, 5, 10, 20, 30, 40)): KMeansModel ={
 
@@ -218,20 +215,57 @@ object TRAPSpark extends Helper {
     val best = costs.minBy(_._3)
     println("Best model with k = " + best._1)
 
-    best._2
+    val bestModel = best._2
+
+    println("Cost = " + bestModel.computeCost(df) + "\n" +
+      "Summary = " + bestModel.summary.clusterSizes.mkString(", "))
+
+    bestModel
   }
 
-  def computeKMeans(df: DataFrame, spark: SparkSession) = {
-    val Array(training, test) = df.randomSplit(Array(0.7, 0.3))
-    val kmeans = computeBestKMeans(training)
+  def computeGMM(df: DataFrame,
+                 numIterations: Int = 20,
+                 kVals: Seq[Int] = Seq(2, 3, 4, 5, 10, 20, 30, 40)): GaussianMixtureModel ={
 
-    // Evaluate clustering by computing Within Set Sum of Squared Errors
-    val clusters = kmeans.transform(test)
-    println(//"Cost = " + kmeans.computeCost(test) + "\n" +
-      "Summary = " + kmeans.summary.clusterSizes.mkString(", "))
+    val Array(train, test) = df.randomSplit(Array(0.7, 0.3))
+    val costs = kVals.map { k =>
+      val model = new GaussianMixture()
+        .setK(k)
+        .setMaxIter(numIterations)
+        .fit(train)
 
-    // Save and load model
-    kmeans.write.overwrite.save("data/model/kmeans.model")
+      def getProbPredUDF = udf((pred: Int, probs: Seq[Double]) => probs(pred))
+
+      val avgConfidence = model.transform(test)
+        .withColumn("prob_pred", getProbPredUDF(col(model.getPredictionCol), array(col(model.getProbabilityCol))))
+        .groupBy()
+        .agg(avg(model.getProbabilityCol))
+        .head.getDouble(0)
+
+      (model.summary.k, model, avgConfidence)
+    }
+    println("Clustering cross-validation:")
+    costs.foreach { case (k, model, avgConf) => println(f"AvgConfidence for K=$k $avgConf%2.2f") }
+
+    val best = costs.maxBy(_._3)
+    println("Best model with k = " + best._1)
+
+    val bestModel = best._2
+
+    println("AVG Confidence= " + best._3 + "\n" +
+      "Summary = " + bestModel.summary.clusterSizes.mkString(", "))
+
+    bestModel
+  }
+
+  def computeClusters(df: DataFrame, spark: SparkSession, algo: String) = {
+
+    val model = algo match {
+      case "kmeans" => computeKMeans(df)
+      case "gmm" => computeGMM(df)
+    }
+
+    model.write.overwrite.save("data/model/" + algo + ".model")
   }
 
 }
