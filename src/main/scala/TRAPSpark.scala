@@ -85,9 +85,6 @@ object TRAPSpark extends Helper {
   }
 
   def getFixableMultiNatDF(spark: SparkSession, df: Dataset[Row]) = {
-    if(new File(FIXABLE_MULTINAT_DATA).isDirectory)
-      readParquet(spark, FIXABLE_MULTINAT_DATA)
-    else {
       val res = df.filter(col("num_nat") === 2 && array_contains(col("nats"),"?"))
         .withColumn("real_nat", col("nats")(1))
         .select("plate", "real_nat")
@@ -95,7 +92,6 @@ object TRAPSpark extends Helper {
       writeParquet(res, FIXABLE_MULTINAT_DATA)
 
       res
-    }
   }
 
   def getFixedData(spark: SparkSession, df: DataFrame, fixableMultiNat: DataFrame, path: String) = {
@@ -187,44 +183,65 @@ object TRAPSpark extends Helper {
       if(new File(FIXED_DATA).isDirectory)
         readParquet(spark, FIXED_DATA)
       else {
-        var df = getRawData(spark)
-          .filter(col("nationality").isNotNull && length(col("nationality")) <= 3)
-        //      .withColumn("timestamp", unix_timestamp(col("timestamp")))
+        var df = getRawData(spark).filter(col("nationality").isNotNull && length(col("nationality")) <= 3)
 
         df.show(false)
 
-        val totRows = df.count
-
-        println("Tot rows: " + totRows)
+        println("Tot rows: " + df.count)
 
         val spatialConflictsDF = getSpatialConflictsDF(spark, df)
 
-        println(spatialConflictsDF.count)
-//        spatialConflictsDF.show(false)
+        println("Spatial conflicts count: " + spatialConflictsDF.count)
+        spatialConflictsDF.show(false)
 
         // remove spatial spatialConflictsDF
-        df = df.except(df.join(spatialConflictsDF, df("gate") === spatialConflictsDF("gate") and
-          df("lane") === spatialConflictsDF("lane") and df("gate") === spatialConflictsDF("gate"), "semijoin"))
+        df = df.except(
+          df.join(spatialConflictsDF,
+            df("gate") === spatialConflictsDF("gate") and
+            df("lane") === spatialConflictsDF("lane") and
+            df("timestamp") === spatialConflictsDF("timestamp"), "leftsemi"))
 
-        println("Spatial conflicts removed")
+        println("Spatial conflicts removed, count: " + df.count)
+/*
+        println(df.filter(col("plate").isNull).count)
 
-        val multiNat = getMultinatDF(spark, df)
+        println("Spatial conflicts lefts: " +
+          df.groupBy("gate", "lane", "timestamp")
+          .agg(countDistinct("plate").as("plates"))
+          .filter(col("plates") > 1).count)
+*/
+        val fixableMultiNat =
+          if(new File(FIXABLE_MULTINAT_DATA).isDirectory)
+            readParquet(spark, FIXABLE_MULTINAT_DATA)
+          else {
+            val multiNat = getMultinatDF(spark, df)
 
-        multiNat.show(false)
+            multiNat.show(false)
 
-        println(multiNat.count)
+            println(multiNat.count)
 
-        val fixableMultiNat = getFixableMultiNatDF(spark, multiNat)
+            getFixableMultiNatDF(spark, multiNat)
+          }
 
         fixableMultiNat.show(false)
 
         getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
       }
 
-    df = df.na.fill("?", Array("nationality"))
+    df = df.cache
+
+/*
+    println(df.count)
+
+    df.columns.map(c => c -> df.na.drop(Array(c)).count()).foreach(println)
+
+    //df = df.na.fill("?", Array("nationality"))
+
+//    println(df.count)
 
     df = df.filter(month(col("timestamp")) === 1)
     df.show(false)
+*/
 
     val windowDF = windowAnalysis(df)
 
