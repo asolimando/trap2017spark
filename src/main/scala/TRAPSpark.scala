@@ -6,7 +6,6 @@ import java.sql.Timestamp
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.linalg.DenseVector
-import org.apache.spark.ml.linalg.VectorUDT
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.joda.time.{DateTime, Duration}
 
@@ -14,7 +13,7 @@ import scala.annotation.tailrec
 
 trait Helper {
   val CSV_INPUT = "data/all.csv"
-  val PARQUET_DATA = "data/raw.parquet"
+  val RAW_DATA = "data/raw.parquet"
 
   val CONFLICTS_DATA = "data/conflicts.parquet"
 
@@ -33,7 +32,7 @@ trait Helper {
 object TRAPSpark extends Helper {
 
   def getRawData(spark: SparkSession): DataFrame ={
-    val parquetFile = new File(PARQUET_DATA)
+    val parquetFile = new File(RAW_DATA)
 
     if(!parquetFile.isDirectory){
       val csv = spark.read
@@ -46,10 +45,10 @@ object TRAPSpark extends Helper {
         .toDF("plate", "gate", "lane", "timestamp", "nationality")
         .distinct
 
-      csv.write.parquet(PARQUET_DATA)
+      csv.write.parquet(RAW_DATA)
     }
 
-    readParquet(spark, PARQUET_DATA)
+    readParquet(spark, RAW_DATA)
   }
 
   def writeParquet(df: DataFrame, path: String) = df.write.parquet(path)
@@ -121,9 +120,9 @@ object TRAPSpark extends Helper {
     }
   }
 
-  def windowAnalysis(df: DataFrame) = {
+  def windowAnalysis(df: DataFrame, timespan: String = "1 hour") = {
     val windowDF = df
-      .groupBy(col("plate"), window(df.col("timestamp"), "1 hour"))
+      .groupBy(col("plate"), window(df.col("timestamp"), timespan))
       .agg(
         countDistinct("gate").as("hourly_gates"),
         avgDaysDifferenceUDF(sort_array(collect_list("timestamp"))).as("day_avg_diff"),
@@ -315,7 +314,7 @@ object TRAPSpark extends Helper {
         .fit(train)
 
       def getProbPredUDF = udf((pred: Int, probs: DenseVector) => probs.values(pred))
-      
+
       val avgConfidence = model.transform(test)
         .withColumn("prob_pred", getProbPredUDF(col(model.getPredictionCol), col(model.getProbabilityCol)))
         .groupBy()

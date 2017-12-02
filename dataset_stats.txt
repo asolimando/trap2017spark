@@ -1,0 +1,120 @@
+Data quality problems reported:
+
+1) spatial conflicts: rows sharing the same same gate, lane and timestamp, but distinct plates (some with > 2 distinct plates)
+
+Computation:
+df.groupBy("gate", "lane", "timestamp")
+  .agg(countDistinct("plate").as("plates"))
+  .filter(col("plates") > 1)
+
+Analysis:
+
+--) conflicts.count
+
+res80: Long = 7178903
+
+
+--) conflicts.orderBy(desc("plates")).limit(10).show(false)
+
++----+----+---------------------+------+
+|gate|lane|timestamp            |plates|
++----+----+---------------------+------+
+|18  |2.0 |2016-07-22 11:39:00.0|52    |
+|23  |2.0 |2016-07-22 11:38:00.0|52    |
+|23  |2.0 |2016-07-22 11:48:00.0|50    |
+|23  |2.0 |2016-07-22 11:11:00.0|49    |
+|18  |2.0 |2016-07-22 11:16:00.0|49    |
+|20  |2.0 |2016-07-22 10:43:00.0|48    |
+|23  |2.0 |2016-07-22 10:26:00.0|48    |
+|5   |2.0 |2016-07-22 10:39:00.0|48    |
+|5   |2.0 |2016-07-22 10:59:00.0|46    |
+|23  |2.0 |2016-07-22 10:40:00.0|46    |
++----+----+---------------------+------+
+
+--) conflicts.groupBy(date_format(col("timestamp"), "yyyy-MM").as("yearMonth")).count.orderBy("yearMonth").show(false)
+
++---------+------+
+|yearMonth|count |
++---------+------+
+|2016-01  |345539|
+|2016-02  |415999|
+|2016-03  |644539|
+|2016-04  |638525|
+|2016-05  |744058|
+|2016-06  |791434|
+|2016-07  |868423|
+|2016-08  |668125|
+|2016-09  |674792|
+|2016-10  |533220|
+|2016-11  |473790|
+|2016-12  |380459|
++---------+------+
+
+So they span roughly uniformly along the whole monthly data in the dataset.
+
+2) nationality conflicts: same plate but different nationalities
+
+Computation:
+df.groupBy("plate")
+  .agg(collect_set("nationality").as("nats"), countDistinct("nationality").as("num_nat"))
+  .filter(col("num_nat") > 1)
+  .withColumn("nats", sort_array(col("nats")))
+
+Analysis:
+
+--) multinat.count
+
+res126: Long = 117717
+
+
+--) multinat.orderBy(desc("num_nat")).limit(10).show(false)
+
++-------+----------+-------+
+|plate  |nats      |num_nat|
++-------+----------+-------+
+|132449 |[?, HR, I]|3      |
+|8515350|[?, HR, I]|3      |
+|1363101|[?, HR, I]|3      |
+|1574581|[?, HR, I]|3      |
+|1770385|[?, HR, I]|3      |
+|8029721|[?, HR, I]|3      |
+|110836 |[?, HR, I]|3      |
+|1179601|[?, HR, I]|3      |
+|1459586|[?, HR, I]|3      |
+|1731081|[?, HR, I]|3      |
++-------+----------+-------+
+
+
+--) multinat.groupBy("num_nat").count.orderBy("num_nat").show
+
++-------+------+
+|num_nat| count|
++-------+------+
+|      2|116981|
+|      3|   736|
++-------+------+
+
+--) multinat.groupBy("nats").count.orderBy(desc("count")).show
+
++----------+-----+
+|      nats|count|
++----------+-----+
+|    [?, I]|59888|
+|   [?, RO]|26709|
+|    [?, H]|13653|
+|   [?, CH]| 5182|
+|   [?, HR]| 4710|
+|   [HR, I]| 4546|
+|  [?, SLO]| 1884|
+|[?, HR, I]|  722|
+|   [?, MP]|  229|
+|   [CH, I]|  180|
+|[?, CH, I]|   14|
++----------+-----+
+
+--) multinat.filter(col("num_nat") === 2 && array_contains(col("nats"),"?")).count
+
+res134: Long = 112255
+
+This last category can be "fixed" by applying the known nationality (i.e., not "?") to all the rows with that plate, but it is not a 100% safe method 
+as further data might introduce new nationality for the same plate, resulting into an ambiguity
