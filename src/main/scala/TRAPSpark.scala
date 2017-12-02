@@ -5,8 +5,12 @@ import java.sql.Timestamp
 
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature._
-import org.apache.spark.mllib.linalg.VectorUDT
-import org.joda.time.DateTime
+import org.apache.spark.ml.linalg.DenseVector
+import org.apache.spark.ml.linalg.VectorUDT
+import org.apache.spark.sql.expressions.UserDefinedFunction
+import org.joda.time.{DateTime, Duration}
+
+import scala.annotation.tailrec
 
 trait Helper {
   val CSV_INPUT = "data/all.csv"
@@ -67,7 +71,7 @@ object TRAPSpark extends Helper {
     }
   }
 
-  def getConflictsDF(spark: SparkSession, df: DataFrame): DataFrame ={
+  def getSpatialConflictsDF(spark: SparkSession, df: DataFrame): DataFrame ={
     if(new File(CONFLICTS_DATA).isDirectory)
       readParquet(spark, CONFLICTS_DATA)
     else{
@@ -103,8 +107,8 @@ object TRAPSpark extends Helper {
 
       println(df.filter(col("nationality") === "?").count + "/" + totRows + " entries with unknown nationalities")
 
-      val fixed = df.join(fixableMultiNat, df("plate") === fixableMultiNat("plate"))
-        .withColumn("nationality", col("real_nat"))
+      val fixed = df.join(fixableMultiNat, df("plate") === fixableMultiNat("plate"), "leftouter")
+        .withColumn("nationality", when(col("real_nat").isNotNull, col("real_nat")).otherwise(col("nationality")))
         .drop(fixableMultiNat("plate"))
         .drop(fixableMultiNat("real_nat"))
 
@@ -115,6 +119,57 @@ object TRAPSpark extends Helper {
 
       fixed
     }
+  }
+
+  def windowAnalysis(df: DataFrame) = {
+    val windowDF = df
+      .groupBy(col("plate"), window(df.col("timestamp"), "1 hour"))
+      .agg(
+        countDistinct("gate").as("hourly_gates"),
+        avgDaysDifferenceUDF(sort_array(collect_list("timestamp"))).as("day_avg_diff"),
+        avgHoursDifferenceUDF(sort_array(collect_list("timestamp"))).as("hour_avg_diff"),
+        avgMinutesDifferenceUDF(sort_array(collect_list("timestamp"))).as("min_avg_diff"),
+        avgSecondsDifferenceUDF(sort_array(collect_list("timestamp"))).as("sec_avg_diff")
+      )
+      .drop("window")
+      .groupBy("plate")
+      .agg(
+        avg("hourly_gates").as("avg_hourly_gates"),
+        avg("day_avg_diff").as("day_avg_diff"),
+        avg("hour_avg_diff").as("hour_avg_diff"),
+        avg("min_avg_diff").as("min_avg_diff"),
+        avg("sec_avg_diff").as("sec_avg_diff")
+      )
+
+    windowDF.show(false)
+
+    windowDF
+  }
+
+  def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
+    udf((reqDates: Seq[Timestamp]) => {
+      val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
+
+      if(timeDiffList.length == 0)
+        0.0
+      else
+        timeDiffList.sum.toDouble / timeDiffList.length.toDouble
+    })
+  }
+
+  def avgDaysDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardDays)
+  def avgMinutesDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardMinutes)
+  def avgHoursDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardHours)
+  def avgSecondsDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardSeconds)
+
+  def datesDifference(dates: List[DateTime], diff: Duration => Long): List[Long] = {
+    @tailrec
+    def iter(dates: List[DateTime], acc: List[Long]): List[Long] = dates match {
+      case Nil => acc
+      case a :: Nil => acc
+      case a :: b :: tail => iter(b :: tail, diff(new Duration(a, b)) :: acc)
+    }
+    iter(dates, Nil)
   }
 
   def main(args: Array[String]) {
@@ -133,7 +188,7 @@ object TRAPSpark extends Helper {
       if(new File(FIXED_DATA).isDirectory)
         readParquet(spark, FIXED_DATA)
       else {
-        val df = getRawData(spark)
+        var df = getRawData(spark)
           .filter(col("nationality").isNotNull && length(col("nationality")) <= 3)
         //      .withColumn("timestamp", unix_timestamp(col("timestamp")))
 
@@ -143,10 +198,16 @@ object TRAPSpark extends Helper {
 
         println("Tot rows: " + totRows)
 
-        val conflicts = getConflictsDF(spark, df)
+        val spatialConflictsDF = getSpatialConflictsDF(spark, df)
 
-        println(conflicts.count)
-        conflicts.show(false)
+        println(spatialConflictsDF.count)
+//        spatialConflictsDF.show(false)
+
+        // remove spatial spatialConflictsDF
+        df = df.except(df.join(spatialConflictsDF, df("gate") === spatialConflictsDF("gate") and
+          df("lane") === spatialConflictsDF("lane") and df("gate") === spatialConflictsDF("gate"), "semijoin"))
+
+        println("Spatial conflicts removed")
 
         val multiNat = getMultinatDF(spark, df)
 
@@ -161,6 +222,21 @@ object TRAPSpark extends Helper {
         getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
       }
 
+    df = df.na.fill("?", Array("nationality"))
+
+    df = df.filter(month(col("timestamp")) === 1)
+    df.show(false)
+
+    val windowDF = windowAnalysis(df)
+
+    df.filter(col("plate").isNull).show(false)
+
+    df.filter(df.columns.map(col(_).isNull).reduce(_ or _)).show(false)
+
+    println("Count: " + df.count)
+    df = df.na.drop
+    println("Count after dropping nulls: " + df.count)
+
     val nationalityCount = df.groupBy("nationality").count
     nationalityCount.show(false)
 
@@ -171,7 +247,8 @@ object TRAPSpark extends Helper {
            .withColumn("hour", hour(col("timestamp")))
            .withColumn("dayofweek", dayOfWeekUDF(col("timestamp")))
 
-    df = df.groupBy("plate", "nationality").agg(
+    df = df.groupBy("plate").agg(
+      first("nationality").as("nationality"),
       countDistinct("gate").as("num_gates"),
       countDistinct("lane").as("num_lanes"),
       countDistinct("gate", "lane").as("num_gatelane"),
@@ -182,9 +259,12 @@ object TRAPSpark extends Helper {
       countDistinct("timestamp").as("num_seen"),
       min("month").as("min_month"),
       max("month").as("max_month"),
-      min("timestamp").as("min_time"),
-      max("timestamp").as("max_time")
+      unix_timestamp(min("timestamp")).as("min_time"),
+      unix_timestamp(max("timestamp")).as("max_time")
     )
+
+    df = df.join(windowDF, df("plate") === windowDF("plate"))
+           .drop(windowDF("plate"))
 
     val formula = new RFormula()
       .setFormula("label ~ .")
@@ -234,12 +314,12 @@ object TRAPSpark extends Helper {
         .setMaxIter(numIterations)
         .fit(train)
 
-      def getProbPredUDF = udf((pred: Int, probs: Seq[Double]) => probs(pred))
-
+      def getProbPredUDF = udf((pred: Int, probs: DenseVector) => probs.values(pred))
+      
       val avgConfidence = model.transform(test)
-        .withColumn("prob_pred", getProbPredUDF(col(model.getPredictionCol), array(col(model.getProbabilityCol))))
+        .withColumn("prob_pred", getProbPredUDF(col(model.getPredictionCol), col(model.getProbabilityCol)))
         .groupBy()
-        .agg(avg(model.getProbabilityCol))
+        .agg(avg("prob_pred"))
         .head.getDouble(0)
 
       (model.summary.k, model, avgConfidence)
