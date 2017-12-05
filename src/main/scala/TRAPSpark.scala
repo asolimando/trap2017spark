@@ -167,6 +167,26 @@ object TRAPSpark extends Helper {
     iter(dates, Nil)
   }
 
+  def sessions[T](seq: Seq[T], split: (T,T) => Boolean): Seq[Seq[T]] = {
+
+    type State = (Option[T], Vector[Seq[T]], Vector[T])
+    val zero:State = (None,Vector.empty,Vector.empty)
+
+    def nextState(state: State, t: T):State = {
+      state match {
+        case (Some(prev),x,y) if split(prev, t) => (Some(t), x :+ y, Vector(t))
+        case (_, x,y) => (Some(t),x, y :+ t)
+      }
+    }
+
+    def finalize(state: State): Seq[Seq[T]] = {
+      val (_,x,y) =state
+      x :+ y
+    }
+
+    finalize(seq.foldLeft(zero)(nextState))
+  }
+
   def main(args: Array[String]) {
 
     val spark = SparkSession
@@ -228,7 +248,7 @@ object TRAPSpark extends Helper {
         getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
       }
 
-    df = df.cache
+    df = df.filter(month(col("timestamp")) === 1).cache
 
 /*
     println(df.count)
@@ -248,11 +268,11 @@ object TRAPSpark extends Helper {
     df.filter(col("plate").isNull).show(false)
 
     df.filter(df.columns.map(col(_).isNull).reduce(_ or _)).show(false)
-
+/*
     println("Count: " + df.count)
     df = df.na.drop
     println("Count after dropping nulls: " + df.count)
-
+*/
     val nationalityCount = df.groupBy("nationality").count
     nationalityCount.show(false)
 
