@@ -3,6 +3,7 @@ import org.apache.spark.sql.functions._
 import java.io.File
 import java.sql.Timestamp
 
+import org.apache.commons.codec.Encoder
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.linalg.DenseVector
@@ -167,25 +168,36 @@ object TRAPSpark extends Helper {
     iter(dates, Nil)
   }
 
-  def sessions[T](seq: Seq[T], split: (T,T) => Boolean): Seq[Seq[T]] = {
+  case class Event(plate: Int, gate: Int, lane: Double, timestamp: Timestamp)
+  case class Trip(events: Seq[Event])
+
+  def dateTimesToDuration(dt1: DateTime, dt2: DateTime): Duration = new Duration(dt1, dt2)
+
+  def rowToEvent(r: Row): Event =
+    Event(r.getAs[Int]("plate"), r.getAs[Int]("gate"), r.getAs[Double]("lane"), r.getAs[Timestamp]("timestamp"))
+
+  def aggregateTrip[T, U](split: (T,T) => Boolean, aggregator: (Seq[T] => U))(events: Iterator[T]): Iterator[U] = {
 
     type State = (Option[T], Vector[Seq[T]], Vector[T])
-    val zero:State = (None,Vector.empty,Vector.empty)
+    val zero: State = (None, Vector.empty, Vector.empty)
 
     def nextState(state: State, t: T):State = {
       state match {
-        case (Some(prev),x,y) if split(prev, t) => (Some(t), x :+ y, Vector(t))
+        case (Some(prev), x, y) if split(prev, t) => (Some(t), x :+ y, Vector(t))
         case (_, x,y) => (Some(t),x, y :+ t)
       }
     }
 
-    def finalize(state: State): Seq[Seq[T]] = {
-      val (_,x,y) =state
-      x :+ y
+    def finalize(state: State): Iterator[U] = {
+      val (_,x,y) = state
+      (x :+ y).map(aggregator(_)).toList.toIterator
     }
 
-    finalize(seq.foldLeft(zero)(nextState))
+    finalize(events.foldLeft(zero)(nextState))
   }
+
+  def tripSplitFunc = (e1: Event, e2: Event) =>
+    dateTimesToDuration(new DateTime(e1.timestamp), new DateTime(e2.timestamp)).getStandardMinutes > 30
 
   def main(args: Array[String]) {
 
@@ -250,6 +262,31 @@ object TRAPSpark extends Helper {
 
     df = df.filter(month(col("timestamp")) === 1).cache
 
+    df = df.repartition(col("plate"))
+    df = df.sortWithinPartitions("plate", "timestamp")
+
+    import spark.sqlContext.implicits._
+
+    val sessionized = df.rdd.map(rowToEvent(_))
+      .mapPartitions[Trip](aggregateTrip[Event, Trip](tripSplitFunc, (x: Seq[Event]) => new Trip(x)))
+      .zipWithIndex()
+      .map(r => (r._1.events, r._2))
+      .toDF("trip", "trip_id")
+      .select(explode(col("trip")).as("event"), col("trip_id"))
+
+    sessionized.show(false)
+
+    /*
+    sessionized.map(r =>
+      (
+        r.getAs[Event]("event").plate,
+        r.getAs[Event]("event").gate,
+        r.getAs[Event]("event").plate,
+        r.getAs[Event]("event").timestamp,
+        r.getLong(r.fieldIndex("trip_id"))
+      )
+    ).show(false)
+*/
 /*
     println(df.count)
 
