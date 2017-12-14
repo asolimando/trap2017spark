@@ -12,6 +12,7 @@ import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.joda.time.{DateTime, Duration}
 
 import scala.annotation.tailrec
+import scala.collection.mutable
 
 trait Helper {
   val CSV_INPUT = "data/all.csv"
@@ -29,6 +30,11 @@ trait Helper {
   val LOCALDIR = "tmpdir"
 
   val FEATURES_COLNAME = "features"
+
+  val GATES_DATA = "data/gates.csv"
+  val ARCS_DATA = "data/arcs.csv"
+
+  val CUT_TIME = 3 * 60
 }
 
 object TRAPSpark extends Helper {
@@ -40,8 +46,8 @@ object TRAPSpark extends Helper {
       val csv = spark.read
         .option("inferSchema", true)
         .option("header", false)
-        .option("mode","FAILFAST")
-        .option("delimiter",";")
+        .option("mode", "FAILFAST")
+        .option("delimiter", ";")
         .option("timestampFormat", "yyyy-MM-dd HH:mm:ss")
         .csv(CSV_INPUT)
         .toDF("plate", "gate", "lane", "timestamp", "nationality")
@@ -56,6 +62,16 @@ object TRAPSpark extends Helper {
   def writeParquet(df: DataFrame, path: String) = df.write.parquet(path)
 
   def readParquet(spark: SparkSession, path: String): DataFrame = spark.read.parquet(path)
+
+  def readCSV(spark: SparkSession, path: String): DataFrame =
+    spark
+      .read
+      .option("header", true)
+      .option("inferSchema", true)
+      .csv(path)
+
+  def saveCSV(df: DataFrame, path: String) =
+    df.coalesce(1).write.option("header", true).csv(path)
 
   def getMultinatDF(spark: SparkSession, df: DataFrame): DataFrame ={
     if(new File(MULTINAT_DATA).isDirectory)
@@ -198,7 +214,7 @@ object TRAPSpark extends Helper {
   }
 
   def tripSplitFunc = (e1: Event, e2: Event) =>
-    dateTimesToDuration(new DateTime(e1.timestamp), new DateTime(e2.timestamp)).getStandardMinutes > 30
+    dateTimesToDuration(new DateTime(e1.timestamp), new DateTime(e2.timestamp)).getStandardMinutes > CUT_TIME
 
   def main(args: Array[String]) {
 
@@ -261,12 +277,38 @@ object TRAPSpark extends Helper {
         getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
       }
 
-    df = df.filter(month(col("timestamp")) === 1 and col("plate") === 259).cache
+    df = df.filter(month(col("timestamp")) === 1 and col("plate") === 259)
+
+    val gfrom = readCSV(spark, GATES_DATA)
+      .withColumnRenamed("gateid", "gateid_from")
+      .withColumnRenamed("pos", "pos_from")
+      .withColumnRenamed("highwayid", "highwayid_from")
+
+    val gto = readCSV(spark, GATES_DATA)
+      .withColumnRenamed("gateid", "gateid_to")
+      .withColumnRenamed("pos", "pos_to")
+      .withColumnRenamed("highwayid", "highwayid_to")
+
+    var arcsDF = readCSV(spark, ARCS_DATA)
+
+    arcsDF = arcsDF
+      .join(gfrom, arcsDF("from") === gfrom("gateid_from"))
+      .join(gto, arcsDF("to") === gto("gateid_to"))
+
+
+    import spark.sqlContext.implicits._
+
+    //arcsDF = arcsDF.as("a1").join(arcsDF.as("a2"), $"a1.highwayid_to" === $"a2.highwayid_from")
+
+    arcsDF.show
+
+//    df.join(gatesDF, df("gate") === gatesDF("gateid")).drop("gateid")
+    df = df.cache
+
+    println("Dataset size: " + df.count)
 
     df = df.repartition(col("plate"))
     df = df.sortWithinPartitions("plate", "timestamp")
-
-    import spark.sqlContext.implicits._
 
     val sessionized = df.rdd.map(rowToEvent(_))
       .mapPartitions[Trip](aggregateTrip[Event, Trip](tripSplitFunc, (x: Seq[Event]) => new Trip(x)))
@@ -283,22 +325,38 @@ object TRAPSpark extends Helper {
       )
 
     sessionized.show(false)
-/*
-    val rows = sessionized.rdd.map(r => Row.fromSeq(
-      Row.unapplySeq(r).
-      Seq(
-        r.getAs[Event]("event").plate,
-        r.getAs[Event]("event").gate,
-        r.getAs[Event]("event").lane,
-        r.getAs[Event]("event").timestamp,
-        r.getLong(r.fieldIndex("trip_id"))
-      )
-    ))
 
-    val schema = StructType(df.schema.fields ++ Array(StructField("trip_id", LongType)))
+    val gatesPairsUDF = udf((a: mutable.WrappedArray[Int]) => a.sliding(2).map(b => (b(0), b(1))).toList)
 
-    spark.sqlContext.createDataFrame(rows, schema).show(false)
-*/
+    var aa = sessionized.groupBy("plate", "trip_id")
+                        .agg(collect_list("gate").as("arcs"))
+                        .filter(size(col("arcs")) > 1)
+    aa.show()
+
+    aa = aa.withColumn("arcs", gatesPairsUDF(col("arcs")))
+           .selectExpr("explode(arcs) as arc")
+           .select(
+             col("arc._1").as("gate_from"),
+             col("arc._2").as("gate_to"))
+
+    aa.show()
+
+    aa.printSchema()
+
+    var arcsFreq = aa.rdd
+      .map(r => (r.getInt(0), r.getInt(1)))
+      .map(p => (p, 1))
+      .reduceByKey(_ + _)
+      .map(r => (r._1._1, r._1._2, r._2))
+      .toDF("gate_from", "gate_to", "count")
+      .orderBy(desc("count"))
+
+    arcsFreq = arcsFreq.join(arcsDF,
+      arcsFreq("gate_from") === arcsDF("from") and arcsFreq("gate_to") === arcsDF("to"),
+      "leftouter"
+    )
+
+    saveCSV(arcsFreq, "arcs_" + CUT_TIME + "m")
 /*
     println(df.count)
 
