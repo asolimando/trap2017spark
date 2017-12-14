@@ -8,6 +8,7 @@ import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KM
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.sql.expressions.UserDefinedFunction
+import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.joda.time.{DateTime, Duration}
 
 import scala.annotation.tailrec
@@ -260,7 +261,7 @@ object TRAPSpark extends Helper {
         getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
       }
 
-    df = df.filter(month(col("timestamp")) === 1).cache
+    df = df.filter(month(col("timestamp")) === 1 and col("plate") === 259).cache
 
     df = df.repartition(col("plate"))
     df = df.sortWithinPartitions("plate", "timestamp")
@@ -273,19 +274,30 @@ object TRAPSpark extends Helper {
       .map(r => (r._1.events, r._2))
       .toDF("trip", "trip_id")
       .select(explode(col("trip")).as("event"), col("trip_id"))
+      .select(
+        "event.plate",
+        "event.gate",
+        "event.lane",
+        "event.timestamp",
+        "trip_id"
+      )
 
     sessionized.show(false)
-
-    /*
-    sessionized.map(r =>
-      (
+/*
+    val rows = sessionized.rdd.map(r => Row.fromSeq(
+      Row.unapplySeq(r).
+      Seq(
         r.getAs[Event]("event").plate,
         r.getAs[Event]("event").gate,
-        r.getAs[Event]("event").plate,
+        r.getAs[Event]("event").lane,
         r.getAs[Event]("event").timestamp,
         r.getLong(r.fieldIndex("trip_id"))
       )
-    ).show(false)
+    ))
+
+    val schema = StructType(df.schema.fields ++ Array(StructField("trip_id", LongType)))
+
+    spark.sqlContext.createDataFrame(rows, schema).show(false)
 */
 /*
     println(df.count)
