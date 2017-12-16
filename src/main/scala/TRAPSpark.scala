@@ -31,7 +31,7 @@ trait Helper {
   val FEATURES_COLNAME = "features"
 
   val GATES_DATA = "data/gates.csv"
-  val ARCS_DATA = "data/arcs.csv"
+  val ARCS_DATA = "data/arcs_closure.csv"
 
   val CUT_TIME = 3 * 60
 
@@ -297,8 +297,8 @@ object TRAPSpark extends Helper {
     var arcsDF = readCSV(spark, ARCS_DATA)
 
     arcsDF = arcsDF
-      .join(gfrom, arcsDF("gate_from") === gfrom("gateid_from"))
-      .join(gto, arcsDF("gate_to") === gto("gateid_to"))
+      .join(gfrom, arcsDF("gatefrom") === gfrom("gateid_from"))
+      .join(gto, arcsDF("gateto") === gto("gateid_to"))
 
 
     import spark.sqlContext.implicits._
@@ -357,9 +357,13 @@ object TRAPSpark extends Helper {
       .orderBy(desc("count"))
 
     arcsFreq = arcsFreq.join(arcsDF,
-      arcsFreq("gatefrom") === arcsDF("from") and arcsFreq("gateto") === arcsDF("to"),
+      arcsFreq("gatefrom") === arcsDF("gatefrom") and arcsFreq("gateto") === arcsDF("gateto"),
       "leftouter"
     )
+    .drop(arcsDF("gatefrom"))
+    .drop(arcsDF("gateto"))
+
+    arcsFreq.filter(col("count").isNull).show()
 
     saveCSV(arcsFreq, "arcs_" + CUT_TIME + "m")
 /*
