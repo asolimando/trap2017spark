@@ -1,4 +1,4 @@
-from,to,hasEntryExit,hasTollbooth,hasServiceArea
+gatefrom,gateto,hasEntryExit,hasTollbooth,hasServiceArea
 27,9,TRUE,TRUE,FALSE
 9,26,TRUE,FALSE,FALSE
 29,10,TRUE,FALSE,TRUE

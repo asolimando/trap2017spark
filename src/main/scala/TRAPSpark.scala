@@ -3,7 +3,6 @@ import org.apache.spark.sql.functions._
 import java.io.File
 import java.sql.Timestamp
 
-import org.apache.commons.codec.Encoder
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.linalg.DenseVector
@@ -35,6 +34,34 @@ trait Helper {
   val ARCS_DATA = "data/arcs.csv"
 
   val CUT_TIME = 3 * 60
+
+  def writeParquet(df: DataFrame, path: String) = df.write.parquet(path)
+
+  def readParquet(spark: SparkSession, path: String): DataFrame = spark.read.parquet(path)
+
+  def readCSV(spark: SparkSession, path: String): DataFrame =
+    spark
+      .read
+      .option("header", true)
+      .option("inferSchema", true)
+      .csv(path)
+
+  def saveCSV(df: DataFrame, path: String) =
+    df.coalesce(1).write.option("mode", "overwrite").option("header", true).csv(path)
+
+  def init(): SparkSession = {
+    val spark = SparkSession
+      .builder()
+      .appName("TRAP2017")
+      .config("spark.sql.warehouse.dir", WHLOCATION)
+      .config("spark.local.dir", LOCALDIR)
+      .master("local[*]")
+      .getOrCreate()
+
+    spark.sparkContext.setLogLevel("ERROR")
+
+    spark
+  }
 }
 
 object TRAPSpark extends Helper {
@@ -58,20 +85,6 @@ object TRAPSpark extends Helper {
 
     readParquet(spark, RAW_DATA)
   }
-
-  def writeParquet(df: DataFrame, path: String) = df.write.parquet(path)
-
-  def readParquet(spark: SparkSession, path: String): DataFrame = spark.read.parquet(path)
-
-  def readCSV(spark: SparkSession, path: String): DataFrame =
-    spark
-      .read
-      .option("header", true)
-      .option("inferSchema", true)
-      .csv(path)
-
-  def saveCSV(df: DataFrame, path: String) =
-    df.coalesce(1).write.option("header", true).csv(path)
 
   def getMultinatDF(spark: SparkSession, df: DataFrame): DataFrame ={
     if(new File(MULTINAT_DATA).isDirectory)
@@ -218,15 +231,7 @@ object TRAPSpark extends Helper {
 
   def main(args: Array[String]) {
 
-    val spark = SparkSession
-      .builder()
-      .appName("TRAP2017")
-      .config("spark.sql.warehouse.dir", WHLOCATION)
-      .config("spark.local.dir", LOCALDIR)
-      .master("local[*]")
-      .getOrCreate()
-
-    spark.sparkContext.setLogLevel("ERROR")
+    val spark = init()
 
     var df =
       if(new File(FIXED_DATA).isDirectory)
@@ -292,8 +297,8 @@ object TRAPSpark extends Helper {
     var arcsDF = readCSV(spark, ARCS_DATA)
 
     arcsDF = arcsDF
-      .join(gfrom, arcsDF("from") === gfrom("gateid_from"))
-      .join(gto, arcsDF("to") === gto("gateid_to"))
+      .join(gfrom, arcsDF("gate_from") === gfrom("gateid_from"))
+      .join(gto, arcsDF("gate_to") === gto("gateid_to"))
 
 
     import spark.sqlContext.implicits._
@@ -336,8 +341,8 @@ object TRAPSpark extends Helper {
     aa = aa.withColumn("arcs", gatesPairsUDF(col("arcs")))
            .selectExpr("explode(arcs) as arc")
            .select(
-             col("arc._1").as("gate_from"),
-             col("arc._2").as("gate_to"))
+             col("arc._1").as("gatefrom"),
+             col("arc._2").as("gateto"))
 
     aa.show()
 
@@ -348,11 +353,11 @@ object TRAPSpark extends Helper {
       .map(p => (p, 1))
       .reduceByKey(_ + _)
       .map(r => (r._1._1, r._1._2, r._2))
-      .toDF("gate_from", "gate_to", "count")
+      .toDF("gatefrom", "gateto", "count")
       .orderBy(desc("count"))
 
     arcsFreq = arcsFreq.join(arcsDF,
-      arcsFreq("gate_from") === arcsDF("from") and arcsFreq("gate_to") === arcsDF("to"),
+      arcsFreq("gatefrom") === arcsDF("from") and arcsFreq("gateto") === arcsDF("to"),
       "leftouter"
     )
 
