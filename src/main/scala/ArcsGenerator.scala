@@ -10,7 +10,7 @@ object ArcsGenerator extends Helper {
   def main(args: Array[String]): Unit = {
     val spark = init()
 
-    var arcsDF = readCSV(spark, ARCS_DATA).cache
+    var arcsDF = readCSV(spark, "data/arcs.csv").cache
 
     var arcs = scala.collection.mutable.Set[Arc]()
 

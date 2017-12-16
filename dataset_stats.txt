@@ -118,3 +118,9 @@ res134: Long = 112255
 
 This last category can be "fixed" by applying the known nationality (i.e., not "?") to all the rows with that plate, but it is not a 100% safe method 
 as further data might introduce new nationality for the same plate, resulting into an ambiguity
+
+3) No information in the attached map for gate 29 (while present in the dataset)
+
+4) there are many self-arcs (temporally consecutive events for the same gate)
+e.g.: plate 259 in January has been registered seven times at gate 8 (at a distance of less than 10m between consecutive events)
+

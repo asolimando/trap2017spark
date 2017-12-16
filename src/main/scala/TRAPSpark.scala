@@ -3,6 +3,7 @@ import org.apache.spark.sql.functions._
 import java.io.File
 import java.sql.Timestamp
 
+import TRAPSpark.Event
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.linalg.DenseVector
@@ -33,7 +34,7 @@ trait Helper {
   val GATES_DATA = "data/gates.csv"
   val ARCS_DATA = "data/arcs_closure.csv"
 
-  val CUT_TIME = 3 * 60
+  val CUT_TIME = 10
 
   def writeParquet(df: DataFrame, path: String) = df.write.parquet(path)
 
@@ -64,8 +65,37 @@ trait Helper {
   }
 }
 
-object TRAPSpark extends Helper {
+trait AnalysisFunc {
+  def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
+    udf((reqDates: Seq[Timestamp]) => {
+      val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
 
+      if(timeDiffList.length == 0)
+        0.0
+      else
+        timeDiffList.sum.toDouble / timeDiffList.length.toDouble
+    })
+  }
+
+  def avgDaysDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardDays)
+  def avgMinutesDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardMinutes)
+  def avgHoursDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardHours)
+  def avgSecondsDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardSeconds)
+
+  def datesDifference(dates: List[DateTime], diff: Duration => Long): List[Long] = {
+    @tailrec
+    def iter(dates: List[DateTime], acc: List[Long]): List[Long] = dates match {
+      case Nil => acc
+      case a :: Nil => acc
+      case a :: b :: tail => iter(b :: tail, diff(new Duration(a, b)) :: acc)
+    }
+    iter(dates, Nil)
+  }
+
+  def dateTimesToDuration(dt1: DateTime, dt2: DateTime): Duration = new Duration(dt1, dt2)
+}
+
+trait ETL extends Helper {
   def getRawData(spark: SparkSession): DataFrame ={
     val parquetFile = new File(RAW_DATA)
 
@@ -116,13 +146,13 @@ object TRAPSpark extends Helper {
   }
 
   def getFixableMultiNatDF(spark: SparkSession, df: Dataset[Row]) = {
-      val res = df.filter(col("num_nat") === 2 && array_contains(col("nats"),"?"))
-        .withColumn("real_nat", col("nats")(1))
-        .select("plate", "real_nat")
+    val res = df.filter(col("num_nat") === 2 && array_contains(col("nats"),"?"))
+      .withColumn("real_nat", col("nats")(1))
+      .select("plate", "real_nat")
 
-      writeParquet(res, FIXABLE_MULTINAT_DATA)
+    writeParquet(res, FIXABLE_MULTINAT_DATA)
 
-      res
+    res
   }
 
   def getFixedData(spark: SparkSession, df: DataFrame, fixableMultiNat: DataFrame, path: String) = {
@@ -146,6 +176,71 @@ object TRAPSpark extends Helper {
       fixed
     }
   }
+}
+
+trait Sessionization extends Helper with AnalysisFunc {
+  case class Event(plate: Int, gate: Int, lane: Double, timestamp: Timestamp)
+  case class Trip(events: Seq[Event])
+
+  /**
+    * Converts a row into an event.
+    * @param r the row to convert
+    * @return an event encoding the information of the row.
+    */
+  def rowToEvent(r: Row): Event =
+    Event(r.getAs[Int]("plate"), r.getAs[Int]("gate"), r.getAs[Double]("lane"), r.getAs[Timestamp]("timestamp"))
+
+  def aggregateTrip[T, U](split: (T,T) => Boolean, aggregator: (Seq[T] => U))(events: Iterator[T]): Iterator[U] = {
+
+    type State = (Option[T], Vector[Seq[T]], Vector[T])
+    val zero: State = (None, Vector.empty, Vector.empty)
+
+    def nextState(state: State, t: T):State = {
+      state match {
+        case (Some(prev), x, y) if split(prev, t) => (Some(t), x :+ y, Vector(t))
+        case (_, x,y) => (Some(t),x, y :+ t)
+      }
+    }
+
+    def finalize(state: State): Iterator[U] = {
+      val (_,x,y) = state
+      (x :+ y).map(aggregator(_)).toList.toIterator
+    }
+
+    finalize(events.foldLeft(zero)(nextState))
+  }
+
+  /**
+    * Returns true iff enough time has passed in between two events to consider them unrelated.
+    * @return true iff enough time has passed in between two events to consider them unrelated.
+    */
+  def tripSplitFunc = (e1: Event, e2: Event) =>
+    dateTimesToDuration(new DateTime(e1.timestamp), new DateTime(e2.timestamp)).getStandardMinutes > CUT_TIME
+
+  /**
+    * Given the set of service areas (pair of gates in the considered segment) it returns true iff there is a service area.
+    * @param serviceAreas the set of service areas
+    * @param e1 event for segment entering
+    * @param e2 event for segment exit
+    * @return returns true iff there is a service area in the considered segment.
+    */
+  def isServiceArea(serviceAreas: Set[(Int, Int)] = Set())(e1: Event, e2: Event) =
+    serviceAreas.contains((e1.gate, e2.gate))
+
+  /**
+    * Splits if the condition is met and the two events are an eligible split point.
+    * @param isEligible a test for split eligibility
+    * @param isSplit a test for the split condition
+    * @param e1 a candidate to be the last event of the current session
+    * @param e2 a candidate to be the first event of the next session
+    * @return true iff the condition is met and the two events are an eligible split point.
+    */
+  def splitFuncIfEligible(isEligible: (Event, Event) => Boolean)
+                         (isSplit: (Event, Event) => Boolean)
+                         (e1: Event, e2: Event): Boolean = isEligible(e1, e2) && isSplit(e1, e2)
+}
+
+object TRAPSpark extends Helper with Sessionization with ETL {
 
   def windowAnalysis(df: DataFrame, timespan: String = "1 hour") = {
     val windowDF = df
@@ -172,67 +267,11 @@ object TRAPSpark extends Helper {
     windowDF
   }
 
-  def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
-    udf((reqDates: Seq[Timestamp]) => {
-      val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
-
-      if(timeDiffList.length == 0)
-        0.0
-      else
-        timeDiffList.sum.toDouble / timeDiffList.length.toDouble
-    })
-  }
-
-  def avgDaysDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardDays)
-  def avgMinutesDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardMinutes)
-  def avgHoursDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardHours)
-  def avgSecondsDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardSeconds)
-
-  def datesDifference(dates: List[DateTime], diff: Duration => Long): List[Long] = {
-    @tailrec
-    def iter(dates: List[DateTime], acc: List[Long]): List[Long] = dates match {
-      case Nil => acc
-      case a :: Nil => acc
-      case a :: b :: tail => iter(b :: tail, diff(new Duration(a, b)) :: acc)
-    }
-    iter(dates, Nil)
-  }
-
-  case class Event(plate: Int, gate: Int, lane: Double, timestamp: Timestamp)
-  case class Trip(events: Seq[Event])
-
-  def dateTimesToDuration(dt1: DateTime, dt2: DateTime): Duration = new Duration(dt1, dt2)
-
-  def rowToEvent(r: Row): Event =
-    Event(r.getAs[Int]("plate"), r.getAs[Int]("gate"), r.getAs[Double]("lane"), r.getAs[Timestamp]("timestamp"))
-
-  def aggregateTrip[T, U](split: (T,T) => Boolean, aggregator: (Seq[T] => U))(events: Iterator[T]): Iterator[U] = {
-
-    type State = (Option[T], Vector[Seq[T]], Vector[T])
-    val zero: State = (None, Vector.empty, Vector.empty)
-
-    def nextState(state: State, t: T):State = {
-      state match {
-        case (Some(prev), x, y) if split(prev, t) => (Some(t), x :+ y, Vector(t))
-        case (_, x,y) => (Some(t),x, y :+ t)
-      }
-    }
-
-    def finalize(state: State): Iterator[U] = {
-      val (_,x,y) = state
-      (x :+ y).map(aggregator(_)).toList.toIterator
-    }
-
-    finalize(events.foldLeft(zero)(nextState))
-  }
-
-  def tripSplitFunc = (e1: Event, e2: Event) =>
-    dateTimesToDuration(new DateTime(e1.timestamp), new DateTime(e2.timestamp)).getStandardMinutes > CUT_TIME
-
   def main(args: Array[String]) {
 
     val spark = init()
 
+    // basic ETL for trying to derive missing nationality information, removing spatial conflicts etc
     var df =
       if(new File(FIXED_DATA).isDirectory)
         readParquet(spark, FIXED_DATA)
@@ -284,6 +323,7 @@ object TRAPSpark extends Helper {
 
     df = df.filter(month(col("timestamp")) === 1 and col("plate") === 259)
 
+    // enrich segments with the information of the gates at their extremities
     val gfrom = readCSV(spark, GATES_DATA)
       .withColumnRenamed("gateid", "gateid_from")
       .withColumnRenamed("pos", "pos_from")
@@ -296,24 +336,28 @@ object TRAPSpark extends Helper {
 
     var arcsDF = readCSV(spark, ARCS_DATA)
 
+    println("#arcs pre = " + arcsDF.count)
+
     arcsDF = arcsDF
       .join(gfrom, arcsDF("gatefrom") === gfrom("gateid_from"))
       .join(gto, arcsDF("gateto") === gto("gateid_to"))
+      .drop(gfrom("gateid_from"))
+      .drop(gto("gateid_to"))
 
-
-    import spark.sqlContext.implicits._
-
-    //arcsDF = arcsDF.as("a1").join(arcsDF.as("a2"), $"a1.highwayid_to" === $"a2.highwayid_from")
+    println("#arcs post = " + arcsDF.count)
 
     arcsDF.show
 
-//    df.join(gatesDF, df("gate") === gatesDF("gateid")).drop("gateid")
     df = df.cache
 
     println("Dataset size: " + df.count)
 
+    // sessionization in order to split the sequence of events for each car in coherent trips
+    // (according to a given split criteria for understanding when a trip ends and another starts)
     df = df.repartition(col("plate"))
     df = df.sortWithinPartitions("plate", "timestamp")
+
+    import spark.sqlContext.implicits._
 
     val sessionized = df.rdd.map(rowToEvent(_))
       .mapPartitions[Trip](aggregateTrip[Event, Trip](tripSplitFunc, (x: Seq[Event]) => new Trip(x)))
@@ -333,22 +377,22 @@ object TRAPSpark extends Helper {
 
     val gatesPairsUDF = udf((a: mutable.WrappedArray[Int]) => a.sliding(2).map(b => (b(0), b(1))).toList)
 
-    var aa = sessionized.groupBy("plate", "trip_id")
+    var arcsByPlateTrip = sessionized.groupBy("plate", "trip_id")
                         .agg(collect_list("gate").as("arcs"))
                         .filter(size(col("arcs")) > 1)
-    aa.show()
+    arcsByPlateTrip.show()
 
-    aa = aa.withColumn("arcs", gatesPairsUDF(col("arcs")))
+    arcsByPlateTrip = arcsByPlateTrip.withColumn("arcs", gatesPairsUDF(col("arcs")))
            .selectExpr("explode(arcs) as arc")
            .select(
              col("arc._1").as("gatefrom"),
              col("arc._2").as("gateto"))
 
-    aa.show()
+    arcsByPlateTrip.show()
 
-    aa.printSchema()
+    arcsByPlateTrip.printSchema()
 
-    var arcsFreq = aa.rdd
+    var arcsFreq = arcsByPlateTrip.rdd
       .map(r => (r.getInt(0), r.getInt(1)))
       .map(p => (p, 1))
       .reduceByKey(_ + _)
@@ -357,7 +401,8 @@ object TRAPSpark extends Helper {
       .orderBy(desc("count"))
 
     arcsFreq = arcsFreq.join(arcsDF,
-      arcsFreq("gatefrom") === arcsDF("gatefrom") and arcsFreq("gateto") === arcsDF("gateto"),
+      (arcsFreq("gatefrom") === arcsDF("gatefrom") and arcsFreq("gateto") === arcsDF("gateto")) ||
+        (arcsFreq("gateto") === arcsDF("gatefrom") and arcsFreq("gatefrom") === arcsDF("gateto")),
       "leftouter"
     )
     .drop(arcsDF("gatefrom"))
