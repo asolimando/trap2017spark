@@ -65,36 +65,6 @@ trait Helper {
   }
 }
 
-trait AnalysisFunc {
-  def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
-    udf((reqDates: Seq[Timestamp]) => {
-      val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
-
-      if(timeDiffList.length == 0)
-        0.0
-      else
-        timeDiffList.sum.toDouble / timeDiffList.length.toDouble
-    })
-  }
-
-  def avgDaysDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardDays)
-  def avgMinutesDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardMinutes)
-  def avgHoursDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardHours)
-  def avgSecondsDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardSeconds)
-
-  def datesDifference(dates: List[DateTime], diff: Duration => Long): List[Long] = {
-    @tailrec
-    def iter(dates: List[DateTime], acc: List[Long]): List[Long] = dates match {
-      case Nil => acc
-      case a :: Nil => acc
-      case a :: b :: tail => iter(b :: tail, diff(new Duration(a, b)) :: acc)
-    }
-    iter(dates, Nil)
-  }
-
-  def dateTimesToDuration(dt1: DateTime, dt2: DateTime): Duration = new Duration(dt1, dt2)
-}
-
 trait ETL extends Helper {
   def getRawData(spark: SparkSession): DataFrame ={
     val parquetFile = new File(RAW_DATA)
@@ -178,7 +148,37 @@ trait ETL extends Helper {
   }
 }
 
-trait Sessionization extends Helper with AnalysisFunc {
+trait TimeHandling {
+  def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
+    udf((reqDates: Seq[Timestamp]) => {
+      val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
+
+      if(timeDiffList.length == 0)
+        0.0
+      else
+        timeDiffList.sum.toDouble / timeDiffList.length.toDouble
+    })
+  }
+
+  def avgDaysDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardDays)
+  def avgMinutesDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardMinutes)
+  def avgHoursDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardHours)
+  def avgSecondsDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardSeconds)
+
+  def datesDifference(dates: List[DateTime], diff: Duration => Long): List[Long] = {
+    @tailrec
+    def iter(dates: List[DateTime], acc: List[Long]): List[Long] = dates match {
+      case Nil => acc
+      case a :: Nil => acc
+      case a :: b :: tail => iter(b :: tail, diff(new Duration(a, b)) :: acc)
+    }
+    iter(dates, Nil)
+  }
+
+  def dateTimesToDuration(dt1: DateTime, dt2: DateTime): Duration = new Duration(dt1, dt2)
+}
+
+trait Sessionization extends Helper with TimeHandling {
   case class Event(plate: Int, gate: Int, lane: Double, timestamp: Timestamp)
   case class Trip(events: Seq[Event])
 
@@ -400,6 +400,7 @@ object TRAPSpark extends Helper with Sessionization with ETL {
       .toDF("gatefrom", "gateto", "count")
       .orderBy(desc("count"))
 
+    // reverse join condition needed as still not clear if the map is one-way or not
     arcsFreq = arcsFreq.join(arcsDF,
       (arcsFreq("gatefrom") === arcsDF("gatefrom") and arcsFreq("gateto") === arcsDF("gateto")) ||
         (arcsFreq("gateto") === arcsDF("gatefrom") and arcsFreq("gatefrom") === arcsDF("gateto")),
