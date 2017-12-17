@@ -160,7 +160,7 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
 
     val gatesPairsWithStartTimeUDF = udf{
       (gates: mutable.WrappedArray[Int], timestamps: mutable.WrappedArray[Timestamp]) =>
-        gates.sliding(2).map(b => (b(0), b(1))).toList.zip(timestamps.init)
+        gates.sliding(2).map(a => (a(0), a(1))).toList zip timestamps.sliding(2).map(a => (a(0), a(1))).toList
     }
 
     var arcsByPlateTrip = sessionized.groupBy("plate", "trip_id")
@@ -170,7 +170,7 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
                         )
                         .filter(size(col("arcs")) > 1)
 
-    arcsByPlateTrip.show()
+    arcsByPlateTrip.show(false)
 
     arcsByPlateTrip = arcsByPlateTrip
       .withColumn("timedarcs", gatesPairsWithStartTimeUDF(col("arcs"), col("timestamps")))
@@ -180,10 +180,11 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
         col("trip_id"),
         col("timedarc._1._1").as("gatefrom"),
         col("timedarc._1._2").as("gateto"),
-        col("timedarc._2").as("timestamp")
+        col("timedarc._2._1").as("tstart"),
+        col("timedarc._2._2").as("tend")
       )
 
-    arcsByPlateTrip.show()
+    arcsByPlateTrip.show(false)
     arcsByPlateTrip.printSchema()
 
     def joinArcExtraInfo(df: DataFrame, arcsDF: DataFrame): DataFrame = {
@@ -215,14 +216,14 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
 
     arcsFreq = joinArcExtraInfo(arcsFreq, arcsDF)
 
-    arcsFreq.orderBy(desc("count")).show()
+    arcsFreq.orderBy(desc("count")).show(false)
 
     saveCSV(arcsFreq, "arcs_" + CUT_TIME + "m")
     /*****************************************************/
 
     arcsByPlateTrip = joinArcExtraInfo(arcsByPlateTrip, arcsDF)
 
-    arcsByPlateTrip.show()
+    arcsByPlateTrip.show(false)
     arcsByPlateTrip.printSchema()
 
 /*
@@ -238,7 +239,10 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
     df.show(false)
 */
 
-    val windowDF = windowAnalysis(df)
+    //TODO: to be assessed if after sessionization we still need a window-based analysis
+    val windowDF = windowAnalysis(arcsByPlateTrip, gateColName = "gatefrom", timestampColName = "tstart")
+
+    windowDF.show(false)
 
     df.filter(col("plate").isNull).show(false)
 

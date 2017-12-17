@@ -9,16 +9,19 @@ import org.apache.spark.sql.functions._
   */
 trait WindowHelper {
 
-  def windowAnalysis(df: DataFrame, timespan: String = "1 hour") = {
+  def windowAnalysis(df: DataFrame,
+                     timespan: String = "1 hour",
+                     gateColName: String = "gate",
+                     timestampColName: String = "timestamp") = {
     val windowDF = df
-      .groupBy(col("plate"), window(df.col("timestamp"), timespan))
+      .groupBy(col("plate"), window(df.col(timestampColName), timespan))
       .agg(
-        countDistinct("gate").as("hourly_gates"),
-//        avgDaysDifferenceUDF(sort_array(collect_list("timestamp"))).as("day_avg_diff"),
-//        avgHoursDifferenceUDF(sort_array(collect_list("timestamp"))).as("hour_avg_diff"),
-        avgMinutesDifferenceUDF(sort_array(collect_list("timestamp"))).as("min_avg_diff")
+        countDistinct(gateColName).as("hourly_gates"),
+//        avgDaysDifferenceUDF(sort_array(collect_list(timestampColName))).as("day_avg_diff"),
+//        avgHoursDifferenceUDF(sort_array(collect_list(timestampColName))).as("hour_avg_diff"),
+        avgMinutesDifferenceUDF(sort_array(collect_list(timestampColName))).as("min_avg_diff")
 //        ,
-//        avgSecondsDifferenceUDF(sort_array(collect_list("timestamp"))).as("sec_avg_diff")
+//        avgSecondsDifferenceUDF(sort_array(collect_list(timestampColName))).as("sec_avg_diff")
       )
       .drop("window")
       .groupBy("plate")
