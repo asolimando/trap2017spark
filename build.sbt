@@ -10,6 +10,7 @@ libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-sql" % SPARK_VERSION,
   "org.apache.spark" %% "spark-hive" % SPARK_VERSION,
   "org.apache.spark" %% "spark-mllib" % SPARK_VERSION,
+  "org.apache.spark" %% "spark-graphx" % SPARK_VERSION,
   "joda-time" % "joda-time" % "2.9.4",
   "org.joda" % "joda-convert" % "1.2"
 )

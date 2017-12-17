@@ -4,13 +4,17 @@ import java.io.File
 import java.sql.Timestamp
 
 import com.github.asolimando.trap17._
+import com.github.asolimando.trap17.analysis.window.WindowHelper
 import com.github.asolimando.trap17.analysis.sessionization.{Event, Sessionization, Trip}
 import com.github.asolimando.trap17.etl.ETL
+import com.github.asolimando.trap17.graph.{GateProperty, HighwayGraph, SegmentProperty}
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature.RFormula
 import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.graphx.{Edge, Graph, VertexId}
+import org.apache.spark.rdd.RDD
 import org.joda.time.DateTime
 
 import scala.collection.mutable
@@ -18,7 +22,7 @@ import scala.collection.mutable
 /**
   * Created by ale on 17/12/17.
   */
-object TRAPSpark extends Helper with Sessionization with ETL {
+object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
 
   def main(args: Array[String]) {
 
@@ -76,6 +80,9 @@ object TRAPSpark extends Helper with Sessionization with ETL {
 
     df = df.filter(month(col("timestamp")) === 1 and col("plate") === 259)
 
+
+    /********* LOAD DATASET GATES AND SEGMENTS *******************/
+
     // enrich segments with the information of the gates at their extremities
     val gfrom = readCSV(spark, GATES_DATA)
       .withColumnRenamed("gateid", "gateid_from")
@@ -101,6 +108,22 @@ object TRAPSpark extends Helper with Sessionization with ETL {
 
     arcsDF.show
 
+    /********* GRAPH HANDLING *******************/
+/*    val gates: RDD[(VertexId, (Double, Int))] =
+      gfrom.rdd.map(r => (r.getInt(0).toLong, (r.getDouble(1), r.getInt(2))))
+
+    // Create an RDD for edges
+    val highwaySegments: RDD[Edge[SegmentProperty]] = arcsDF.rdd.map(a =>
+      Edge(a.getInt(), SegmentProperty(a.getBoolean(0), a.getBoolean(1), a.getBoolean(2)))
+    )
+
+    // Dummy gate for segments with a missing extreme
+    val dummyGate = (0, -1.0, -1.0)
+    // Build the initial Graph
+    val highwayGraph = Graph(gates, highwaySegments, dummyGate)
+
+    highwayGraph.
+*/
     df = df.cache
 
     println("Dataset size: " + df.count)
@@ -159,14 +182,20 @@ object TRAPSpark extends Helper with Sessionization with ETL {
       .toDF("gatefrom", "gateto", "count")
       .orderBy(desc("count"))
 
-    // reverse join condition needed as still not clear if the map is one-way or not
-    arcsFreq = arcsFreq.join(arcsDF,
-      (arcsFreq("gatefrom") === arcsDF("gatefrom") and arcsFreq("gateto") === arcsDF("gateto")) ||
-        (arcsFreq("gateto") === arcsDF("gatefrom") and arcsFreq("gatefrom") === arcsDF("gateto")),
-      "leftouter"
-    )
+    val regularArcsJoinCond = arcsFreq("gatefrom") === arcsDF("gatefrom") and arcsFreq("gateto") === arcsDF("gateto")
+    val reversedArcsJoinCond = arcsFreq("gateto") === arcsDF("gatefrom") and arcsFreq("gatefrom") === arcsDF("gateto")
+
+    arcsFreq = arcsFreq.join(arcsDF, regularArcsJoinCond || reversedArcsJoinCond, "leftouter")
+    .withColumn("posfrom", when(regularArcsJoinCond, arcsDF("pos_from")).otherwise(arcsDF("pos_to")))
+    .withColumn("posto", when(regularArcsJoinCond, arcsDF("pos_to")).otherwise(arcsDF("pos_from")))
+    .withColumn("highwayidfrom", when(regularArcsJoinCond, arcsDF("highwayid_from")).otherwise(arcsDF("highwayid_to")))
+    .withColumn("highwayidto", when(regularArcsJoinCond, arcsDF("highwayid_to")).otherwise(arcsDF("highwayid_from")))
     .drop(arcsDF("gatefrom"))
     .drop(arcsDF("gateto"))
+    .drop("pos_from")
+    .drop("pos_to")
+    .drop("highwayid_from")
+    .drop("highwayid_to")
 
     arcsFreq.filter(col("count").isNull).show()
 

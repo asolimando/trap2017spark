@@ -1,13 +1,13 @@
 package com.github.asolimando.trap17.analysis.window
 
-import com.github.asolimando.trap17.analysis.TRAPSpark.{avgDaysDifferenceUDF, avgHoursDifferenceUDF, avgMinutesDifferenceUDF, avgSecondsDifferenceUDF}
+import com.github.asolimando.trap17.analysis.TRAPSpark._
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions._
 
 /**
   * Created by ale on 17/12/17.
   */
-class WindowHelper {
+trait WindowHelper {
 
   def windowAnalysis(df: DataFrame, timespan: String = "1 hour") = {
     val windowDF = df

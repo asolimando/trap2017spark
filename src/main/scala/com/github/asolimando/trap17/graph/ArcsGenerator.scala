@@ -60,6 +60,8 @@ object ArcsGenerator extends Helper {
       }
     }
 
+    import spark.sqlContext.implicits._
+
     val arcsClosure =
       spark.sparkContext.parallelize(arcs.toList)
       .map(a => (a.from, a.to, a.entryExit, a.toll, a.serviceArea))
