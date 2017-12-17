@@ -78,7 +78,8 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
         getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
       }
 
-    df = df.filter(month(col("timestamp")) === 1 and col("plate") === 259)
+    df = df.filter(//month(col("timestamp")) === 1 and
+      col("plate") <= 10000)
 
 
     /********* LOAD DATASET GATES AND SEGMENTS *******************/
@@ -157,24 +158,54 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
 
     sessionized.show(false)
 
-    val gatesPairsUDF = udf((a: mutable.WrappedArray[Int]) => a.sliding(2).map(b => (b(0), b(1))).toList)
+    val gatesPairsWithStartTimeUDF = udf{
+      (gates: mutable.WrappedArray[Int], timestamps: mutable.WrappedArray[Timestamp]) =>
+        gates.sliding(2).map(b => (b(0), b(1))).toList.zip(timestamps.init)
+    }
 
     var arcsByPlateTrip = sessionized.groupBy("plate", "trip_id")
-                        .agg(collect_list("gate").as("arcs"))
+                        .agg(
+                          collect_list("gate").as("arcs"),
+                          collect_list("timestamp").as("timestamps")
+                        )
                         .filter(size(col("arcs")) > 1)
-    arcsByPlateTrip.show()
-
-    arcsByPlateTrip = arcsByPlateTrip.withColumn("arcs", gatesPairsUDF(col("arcs")))
-           .selectExpr("explode(arcs) as arc")
-           .select(
-             col("arc._1").as("gatefrom"),
-             col("arc._2").as("gateto"))
 
     arcsByPlateTrip.show()
 
+    arcsByPlateTrip = arcsByPlateTrip
+      .withColumn("timedarcs", gatesPairsWithStartTimeUDF(col("arcs"), col("timestamps")))
+      .selectExpr("plate", "trip_id", "explode(timedarcs) as timedarc")
+      .select(
+        col("plate"),
+        col("trip_id"),
+        col("timedarc._1._1").as("gatefrom"),
+        col("timedarc._1._2").as("gateto"),
+        col("timedarc._2").as("timestamp")
+      )
+
+    arcsByPlateTrip.show()
     arcsByPlateTrip.printSchema()
 
-    var arcsFreq = arcsByPlateTrip.rdd
+    def joinArcExtraInfo(df: DataFrame, arcsDF: DataFrame): DataFrame = {
+      val regularArcsJoinCond = df("gatefrom") === arcsDF("gatefrom") and df("gateto") === arcsDF("gateto")
+      val reversedArcsJoinCond = df("gateto") === arcsDF("gatefrom") and df("gatefrom") === arcsDF("gateto")
+
+      df.join(broadcast(arcsDF), regularArcsJoinCond || reversedArcsJoinCond, "leftouter")
+        .withColumn("posfrom", when(regularArcsJoinCond, arcsDF("pos_from")).otherwise(arcsDF("pos_to")))
+        .withColumn("posto", when(regularArcsJoinCond, arcsDF("pos_to")).otherwise(arcsDF("pos_from")))
+        .withColumn("highwayidfrom", when(regularArcsJoinCond, arcsDF("highwayid_from")).otherwise(arcsDF("highwayid_to")))
+        .withColumn("highwayidto", when(regularArcsJoinCond, arcsDF("highwayid_to")).otherwise(arcsDF("highwayid_from")))
+        .drop(arcsDF("gatefrom"))
+        .drop(arcsDF("gateto"))
+        .drop("pos_from")
+        .drop("pos_to")
+        .drop("highwayid_from")
+        .drop("highwayid_to")
+    }
+
+    /*********  ARC FREQUENCY OPTIONAL STATS  *************/
+    var arcsFreq = arcsByPlateTrip
+      .select("gatefrom", "gateto").rdd
       .map(r => (r.getInt(0), r.getInt(1)))
       .map(p => (p, 1))
       .reduceByKey(_ + _)
@@ -182,24 +213,18 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
       .toDF("gatefrom", "gateto", "count")
       .orderBy(desc("count"))
 
-    val regularArcsJoinCond = arcsFreq("gatefrom") === arcsDF("gatefrom") and arcsFreq("gateto") === arcsDF("gateto")
-    val reversedArcsJoinCond = arcsFreq("gateto") === arcsDF("gatefrom") and arcsFreq("gatefrom") === arcsDF("gateto")
+    arcsFreq = joinArcExtraInfo(arcsFreq, arcsDF)
 
-    arcsFreq = arcsFreq.join(arcsDF, regularArcsJoinCond || reversedArcsJoinCond, "leftouter")
-    .withColumn("posfrom", when(regularArcsJoinCond, arcsDF("pos_from")).otherwise(arcsDF("pos_to")))
-    .withColumn("posto", when(regularArcsJoinCond, arcsDF("pos_to")).otherwise(arcsDF("pos_from")))
-    .withColumn("highwayidfrom", when(regularArcsJoinCond, arcsDF("highwayid_from")).otherwise(arcsDF("highwayid_to")))
-    .withColumn("highwayidto", when(regularArcsJoinCond, arcsDF("highwayid_to")).otherwise(arcsDF("highwayid_from")))
-    .drop(arcsDF("gatefrom"))
-    .drop(arcsDF("gateto"))
-    .drop("pos_from")
-    .drop("pos_to")
-    .drop("highwayid_from")
-    .drop("highwayid_to")
-
-    arcsFreq.filter(col("count").isNull).show()
+    arcsFreq.orderBy(desc("count")).show()
 
     saveCSV(arcsFreq, "arcs_" + CUT_TIME + "m")
+    /*****************************************************/
+
+    arcsByPlateTrip = joinArcExtraInfo(arcsByPlateTrip, arcsDF)
+
+    arcsByPlateTrip.show()
+    arcsByPlateTrip.printSchema()
+
 /*
     println(df.count)
 
