@@ -1,9 +1,8 @@
-import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
 import java.io.File
 import java.sql.Timestamp
 
-import TRAPSpark.Event
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.linalg.DenseVector
@@ -48,7 +47,7 @@ trait Helper {
       .csv(path)
 
   def saveCSV(df: DataFrame, path: String) =
-    df.coalesce(1).write.option("mode", "overwrite").option("header", true).csv(path)
+    df.coalesce(1).write.mode(SaveMode.Overwrite).option("header", true).csv(path)
 
   def init(): SparkSession = {
     val spark = SparkSession
@@ -148,7 +147,7 @@ trait ETL extends Helper {
   }
 }
 
-trait TimeHandling {
+trait TimeHandling extends Serializable {
   def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
     udf((reqDates: Seq[Timestamp]) => {
       val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
@@ -178,9 +177,10 @@ trait TimeHandling {
   def dateTimesToDuration(dt1: DateTime, dt2: DateTime): Duration = new Duration(dt1, dt2)
 }
 
+case class Event(plate: Int, gate: Int, lane: Double, timestamp: Timestamp)
+case class Trip(events: Seq[Event])
+
 trait Sessionization extends Helper with TimeHandling {
-  case class Event(plate: Int, gate: Int, lane: Double, timestamp: Timestamp)
-  case class Trip(events: Seq[Event])
 
   /**
     * Converts a row into an event.
@@ -214,7 +214,7 @@ trait Sessionization extends Helper with TimeHandling {
     * Returns true iff enough time has passed in between two events to consider them unrelated.
     * @return true iff enough time has passed in between two events to consider them unrelated.
     */
-  def tripSplitFunc = (e1: Event, e2: Event) =>
+  val tripSplitFunc = (e1: Event, e2: Event) =>
     dateTimesToDuration(new DateTime(e1.timestamp), new DateTime(e2.timestamp)).getStandardMinutes > CUT_TIME
 
   /**
@@ -352,6 +352,12 @@ object TRAPSpark extends Helper with Sessionization with ETL {
 
     println("Dataset size: " + df.count)
 
+    val serviceAreas: Set[(Int, Int)] =
+      arcsDF.filter("hasServiceArea").rdd.map(r => (r.getInt(0), r.getInt(1))).collect.toSet
+
+    val soundSplitTestFunc:((Event, Event) => Boolean) =
+      splitFuncIfEligible(isServiceArea(serviceAreas))(tripSplitFunc)
+
     // sessionization in order to split the sequence of events for each car in coherent trips
     // (according to a given split criteria for understanding when a trip ends and another starts)
     df = df.repartition(col("plate"))
@@ -360,7 +366,7 @@ object TRAPSpark extends Helper with Sessionization with ETL {
     import spark.sqlContext.implicits._
 
     val sessionized = df.rdd.map(rowToEvent(_))
-      .mapPartitions[Trip](aggregateTrip[Event, Trip](tripSplitFunc, (x: Seq[Event]) => new Trip(x)))
+      .mapPartitions[Trip](aggregateTrip[Event, Trip](soundSplitTestFunc, (x: Seq[Event]) => new Trip(x)))
       .zipWithIndex()
       .map(r => (r._1.events, r._2))
       .toDF("trip", "trip_id")
