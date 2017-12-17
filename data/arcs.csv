@@ -25,3 +25,4 @@ gatefrom,gateto,hasEntryExit,hasTollbooth,hasServiceArea
 19,25,FALSE,FALSE,TRUE
 5,14,FALSE,FALSE,TRUE
 11,19,TRUE,FALSE,TRUE
+26,10,TRUE,FALSE,TRUE

@@ -1,271 +1,24 @@
-import org.apache.spark.sql._
-import org.apache.spark.sql.functions._
+package com.github.asolimando.trap17.analysis
+
 import java.io.File
 import java.sql.Timestamp
 
+import com.github.asolimando.trap17._
+import com.github.asolimando.trap17.analysis.sessionization.{Event, Sessionization, Trip}
+import com.github.asolimando.trap17.etl.ETL
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
-import org.apache.spark.ml.feature._
+import org.apache.spark.ml.feature.RFormula
 import org.apache.spark.ml.linalg.DenseVector
-import org.apache.spark.sql.expressions.UserDefinedFunction
-import org.apache.spark.sql.types.{LongType, StructField, StructType}
-import org.joda.time.{DateTime, Duration}
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.joda.time.DateTime
 
-import scala.annotation.tailrec
 import scala.collection.mutable
 
-trait Helper {
-  val CSV_INPUT = "data/all.csv"
-  val RAW_DATA = "data/raw.parquet"
-
-  val CONFLICTS_DATA = "data/conflicts.parquet"
-
-  val MULTINAT_DATA = "data/multinat.parquet"
-
-  val FIXABLE_MULTINAT_DATA = "data/fixablemultinat.parquet"
-
-  val FIXED_DATA = "data/fixed.parquet"
-
-  val WHLOCATION = "spark-warehouse"
-  val LOCALDIR = "tmpdir"
-
-  val FEATURES_COLNAME = "features"
-
-  val GATES_DATA = "data/gates.csv"
-  val ARCS_DATA = "data/arcs_closure.csv"
-
-  val CUT_TIME = 10
-
-  def writeParquet(df: DataFrame, path: String) = df.write.parquet(path)
-
-  def readParquet(spark: SparkSession, path: String): DataFrame = spark.read.parquet(path)
-
-  def readCSV(spark: SparkSession, path: String): DataFrame =
-    spark
-      .read
-      .option("header", true)
-      .option("inferSchema", true)
-      .csv(path)
-
-  def saveCSV(df: DataFrame, path: String) =
-    df.coalesce(1).write.mode(SaveMode.Overwrite).option("header", true).csv(path)
-
-  def init(): SparkSession = {
-    val spark = SparkSession
-      .builder()
-      .appName("TRAP2017")
-      .config("spark.sql.warehouse.dir", WHLOCATION)
-      .config("spark.local.dir", LOCALDIR)
-      .master("local[*]")
-      .getOrCreate()
-
-    spark.sparkContext.setLogLevel("ERROR")
-
-    spark
-  }
-}
-
-trait ETL extends Helper {
-  def getRawData(spark: SparkSession): DataFrame ={
-    val parquetFile = new File(RAW_DATA)
-
-    if(!parquetFile.isDirectory){
-      val csv = spark.read
-        .option("inferSchema", true)
-        .option("header", false)
-        .option("mode", "FAILFAST")
-        .option("delimiter", ";")
-        .option("timestampFormat", "yyyy-MM-dd HH:mm:ss")
-        .csv(CSV_INPUT)
-        .toDF("plate", "gate", "lane", "timestamp", "nationality")
-        .distinct
-
-      csv.write.parquet(RAW_DATA)
-    }
-
-    readParquet(spark, RAW_DATA)
-  }
-
-  def getMultinatDF(spark: SparkSession, df: DataFrame): DataFrame ={
-    if(new File(MULTINAT_DATA).isDirectory)
-      readParquet(spark, MULTINAT_DATA)
-    else {
-      val res = df.groupBy("plate")
-        .agg(collect_set("nationality").as("nats"), countDistinct("nationality").as("num_nat"))
-        .filter(col("num_nat") > 1)
-        .withColumn("nats", sort_array(col("nats")))
-
-      writeParquet(res, MULTINAT_DATA)
-
-      res
-    }
-  }
-
-  def getSpatialConflictsDF(spark: SparkSession, df: DataFrame): DataFrame ={
-    if(new File(CONFLICTS_DATA).isDirectory)
-      readParquet(spark, CONFLICTS_DATA)
-    else{
-      val res = df.groupBy("gate", "lane", "timestamp")
-        .agg(countDistinct("plate").as("plates"))
-        .filter(col("plates") > 1)
-
-      writeParquet(res, CONFLICTS_DATA)
-
-      res
-    }
-  }
-
-  def getFixableMultiNatDF(spark: SparkSession, df: Dataset[Row]) = {
-    val res = df.filter(col("num_nat") === 2 && array_contains(col("nats"),"?"))
-      .withColumn("real_nat", col("nats")(1))
-      .select("plate", "real_nat")
-
-    writeParquet(res, FIXABLE_MULTINAT_DATA)
-
-    res
-  }
-
-  def getFixedData(spark: SparkSession, df: DataFrame, fixableMultiNat: DataFrame, path: String) = {
-    if(new File(FIXED_DATA).isDirectory)
-      readParquet(spark, FIXED_DATA)
-    else {
-      val totRows = df.count
-
-      println(df.filter(col("nationality") === "?").count + "/" + totRows + " entries with unknown nationalities")
-
-      val fixed = df.join(fixableMultiNat, df("plate") === fixableMultiNat("plate"), "leftouter")
-        .withColumn("nationality", when(col("real_nat").isNotNull, col("real_nat")).otherwise(col("nationality")))
-        .drop(fixableMultiNat("plate"))
-        .drop(fixableMultiNat("real_nat"))
-
-      println(fixed.filter(col("nationality") === "?").count + "/" + totRows +
-        " entries with unknown nationalities after sanitization")
-
-      writeParquet(fixed, FIXED_DATA)
-
-      fixed
-    }
-  }
-}
-
-trait TimeHandling extends Serializable {
-  def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
-    udf((reqDates: Seq[Timestamp]) => {
-      val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
-
-      if(timeDiffList.length == 0)
-        0.0
-      else
-        timeDiffList.sum.toDouble / timeDiffList.length.toDouble
-    })
-  }
-
-  def avgDaysDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardDays)
-  def avgMinutesDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardMinutes)
-  def avgHoursDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardHours)
-  def avgSecondsDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardSeconds)
-
-  def datesDifference(dates: List[DateTime], diff: Duration => Long): List[Long] = {
-    @tailrec
-    def iter(dates: List[DateTime], acc: List[Long]): List[Long] = dates match {
-      case Nil => acc
-      case a :: Nil => acc
-      case a :: b :: tail => iter(b :: tail, diff(new Duration(a, b)) :: acc)
-    }
-    iter(dates, Nil)
-  }
-
-  def dateTimesToDuration(dt1: DateTime, dt2: DateTime): Duration = new Duration(dt1, dt2)
-}
-
-case class Event(plate: Int, gate: Int, lane: Double, timestamp: Timestamp)
-case class Trip(events: Seq[Event])
-
-trait Sessionization extends Helper with TimeHandling {
-
-  /**
-    * Converts a row into an event.
-    * @param r the row to convert
-    * @return an event encoding the information of the row.
-    */
-  def rowToEvent(r: Row): Event =
-    Event(r.getAs[Int]("plate"), r.getAs[Int]("gate"), r.getAs[Double]("lane"), r.getAs[Timestamp]("timestamp"))
-
-  def aggregateTrip[T, U](split: (T,T) => Boolean, aggregator: (Seq[T] => U))(events: Iterator[T]): Iterator[U] = {
-
-    type State = (Option[T], Vector[Seq[T]], Vector[T])
-    val zero: State = (None, Vector.empty, Vector.empty)
-
-    def nextState(state: State, t: T):State = {
-      state match {
-        case (Some(prev), x, y) if split(prev, t) => (Some(t), x :+ y, Vector(t))
-        case (_, x,y) => (Some(t),x, y :+ t)
-      }
-    }
-
-    def finalize(state: State): Iterator[U] = {
-      val (_,x,y) = state
-      (x :+ y).map(aggregator(_)).toList.toIterator
-    }
-
-    finalize(events.foldLeft(zero)(nextState))
-  }
-
-  /**
-    * Returns true iff enough time has passed in between two events to consider them unrelated.
-    * @return true iff enough time has passed in between two events to consider them unrelated.
-    */
-  val tripSplitFunc = (e1: Event, e2: Event) =>
-    dateTimesToDuration(new DateTime(e1.timestamp), new DateTime(e2.timestamp)).getStandardMinutes > CUT_TIME
-
-  /**
-    * Given the set of service areas (pair of gates in the considered segment) it returns true iff there is a service area.
-    * @param serviceAreas the set of service areas
-    * @param e1 event for segment entering
-    * @param e2 event for segment exit
-    * @return returns true iff there is a service area in the considered segment.
-    */
-  def isServiceArea(serviceAreas: Set[(Int, Int)] = Set())(e1: Event, e2: Event) =
-    serviceAreas.contains((e1.gate, e2.gate))
-
-  /**
-    * Splits if the condition is met and the two events are an eligible split point.
-    * @param isEligible a test for split eligibility
-    * @param isSplit a test for the split condition
-    * @param e1 a candidate to be the last event of the current session
-    * @param e2 a candidate to be the first event of the next session
-    * @return true iff the condition is met and the two events are an eligible split point.
-    */
-  def splitFuncIfEligible(isEligible: (Event, Event) => Boolean)
-                         (isSplit: (Event, Event) => Boolean)
-                         (e1: Event, e2: Event): Boolean = isEligible(e1, e2) && isSplit(e1, e2)
-}
-
+/**
+  * Created by ale on 17/12/17.
+  */
 object TRAPSpark extends Helper with Sessionization with ETL {
-
-  def windowAnalysis(df: DataFrame, timespan: String = "1 hour") = {
-    val windowDF = df
-      .groupBy(col("plate"), window(df.col("timestamp"), timespan))
-      .agg(
-        countDistinct("gate").as("hourly_gates"),
-        avgDaysDifferenceUDF(sort_array(collect_list("timestamp"))).as("day_avg_diff"),
-        avgHoursDifferenceUDF(sort_array(collect_list("timestamp"))).as("hour_avg_diff"),
-        avgMinutesDifferenceUDF(sort_array(collect_list("timestamp"))).as("min_avg_diff"),
-        avgSecondsDifferenceUDF(sort_array(collect_list("timestamp"))).as("sec_avg_diff")
-      )
-      .drop("window")
-      .groupBy("plate")
-      .agg(
-        avg("hourly_gates").as("avg_hourly_gates"),
-        avg("day_avg_diff").as("day_avg_diff"),
-        avg("hour_avg_diff").as("hour_avg_diff"),
-        avg("min_avg_diff").as("min_avg_diff"),
-        avg("sec_avg_diff").as("sec_avg_diff")
-      )
-
-    windowDF.show(false)
-
-    windowDF
-  }
 
   def main(args: Array[String]) {
 
@@ -352,11 +105,11 @@ object TRAPSpark extends Helper with Sessionization with ETL {
 
     println("Dataset size: " + df.count)
 
-    val serviceAreas: Set[(Int, Int)] =
-      arcsDF.filter("hasServiceArea").rdd.map(r => (r.getInt(0), r.getInt(1))).collect.toSet
+    val validTripCutSegments: Set[(Int, Int)] =
+      arcsDF.filter(!col("hasServiceArea") && col("hasEntryExit")).rdd.map(r => (r.getInt(0), r.getInt(1))).collect.toSet
 
     val soundSplitTestFunc:((Event, Event) => Boolean) =
-      splitFuncIfEligible(isServiceArea(serviceAreas))(tripSplitFunc)
+      splitFuncIfEligible(tripSplitEligibilityTest(validTripCutSegments))(tripSplitFunc)
 
     // sessionization in order to split the sequence of events for each car in coherent trips
     // (according to a given split criteria for understanding when a trip ends and another starts)

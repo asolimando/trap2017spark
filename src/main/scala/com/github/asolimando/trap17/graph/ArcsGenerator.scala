@@ -1,3 +1,6 @@
+package com.github.asolimando.trap17.graph
+
+import com.github.asolimando.trap17.Helper
 import org.apache.spark.sql.functions._
 
 /**
@@ -56,8 +59,6 @@ object ArcsGenerator extends Helper {
         fromMap.get(a.from).get += a
       }
     }
-
-    import spark.sqlContext.implicits._
 
     val arcsClosure =
       spark.sparkContext.parallelize(arcs.toList)
