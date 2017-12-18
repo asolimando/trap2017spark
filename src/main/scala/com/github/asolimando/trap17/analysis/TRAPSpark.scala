@@ -83,7 +83,7 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper w
       }
 
     df = df.filter(//month(col("timestamp")) === 1 and
-      col("plate") <= 100)
+      col("plate") <= 10000)
 
 
     /********* LOAD DATASET GATES AND SEGMENTS *******************/
@@ -311,7 +311,8 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper w
       countDistinct("dayofweek").as("num_daysofweek"),
       countDistinct("timestamp").as("num_seen"),
       mostFreqValueUDF(sort_array(collect_list("hour"))).as("mostFreqHour"),
-      mostFreqValueUDF(sort_array(collect_list("dayofweek"))).as("mostFreqDayOfWeek")
+      mostFreqValueUDF(sort_array(collect_list("dayofweek"))).as("mostFreqDayOfWeek"),
+      mostFreqValueUDF(sort_array(collect_list("gate"))).as("mostFreqGate")
     )
 
 /*
@@ -334,13 +335,17 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper w
 
       min("totTimeServiceArea").as("minTotTimeServiceArea"),
       max("totTimeServiceArea").as("maxTotTimeServiceArea"),
-      avg("totTimeServiceArea").as("avgTotTimeServiceArea")
+      avg("totTimeServiceArea").as("avgTotTimeServiceArea"),
+
+      countDistinct("tripid").as("numtrips")
     )
 
     df = df.join(summaryByPlate, df("plate") === summaryByPlate("plate"))
            .drop(summaryByPlate("plate"))
 
     df.show(false)
+
+    // TODO: normalization needed before vectorization
 
     val formula = new RFormula()
       .setFormula("label ~ .")
