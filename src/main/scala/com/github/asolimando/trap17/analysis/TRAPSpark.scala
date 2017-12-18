@@ -8,6 +8,7 @@ import com.github.asolimando.trap17.analysis.window.WindowHelper
 import com.github.asolimando.trap17.analysis.sessionization.{Event, Sessionization, Trip}
 import com.github.asolimando.trap17.etl.ETL
 import com.github.asolimando.trap17.graph.{GateProperty, HighwayGraph, SegmentProperty}
+import com.github.asolimando.trap17.visualization.VizHelper
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.ml.feature.RFormula
 import org.apache.spark.ml.linalg.DenseVector
@@ -15,6 +16,9 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.graphx.{Edge, Graph, VertexId}
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.api.java.UDF1
+import org.apache.spark.sql.expressions.UserDefinedFunction
+import org.apache.spark.sql.types.DoubleType
 import org.joda.time.DateTime
 
 import scala.collection.mutable
@@ -22,7 +26,7 @@ import scala.collection.mutable
 /**
   * Created by ale on 17/12/17.
   */
-object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
+object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper with VizHelper {
 
   def main(args: Array[String]) {
 
@@ -79,7 +83,7 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
       }
 
     df = df.filter(//month(col("timestamp")) === 1 and
-      col("plate") <= 10000)
+      col("plate") <= 100)
 
 
     /********* LOAD DATASET GATES AND SEGMENTS *******************/
@@ -135,6 +139,9 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
     val soundSplitTestFunc:((Event, Event) => Boolean) =
       splitFuncIfEligible(tripSplitEligibilityTest(validTripCutSegments))(tripSplitFunc)
 
+    val nationalityCount = df.groupBy("nationality").count
+    nationalityCount.show(false)
+
     // sessionization in order to split the sequence of events for each car in coherent trips
     // (according to a given split criteria for understanding when a trip ends and another starts)
     df = df.repartition(col("plate"))
@@ -146,14 +153,14 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
       .mapPartitions[Trip](aggregateTrip[Event, Trip](soundSplitTestFunc, (x: Seq[Event]) => new Trip(x)))
       .zipWithIndex()
       .map(r => (r._1.events, r._2))
-      .toDF("trip", "trip_id")
-      .select(explode(col("trip")).as("event"), col("trip_id"))
+      .toDF("trip", "tripid")
+      .select(explode(col("trip")).as("event"), col("tripid"))
       .select(
         "event.plate",
         "event.gate",
         "event.lane",
         "event.timestamp",
-        "trip_id"
+        "tripid"
       )
 
     sessionized.show(false)
@@ -163,7 +170,7 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
         gates.sliding(2).map(a => (a(0), a(1))).toList zip timestamps.sliding(2).map(a => (a(0), a(1))).toList
     }
 
-    var arcsByPlateTrip = sessionized.groupBy("plate", "trip_id")
+    var arcsByPlateTrip = sessionized.groupBy("plate", "tripid")
                         .agg(
                           collect_list("gate").as("arcs"),
                           collect_list("timestamp").as("timestamps")
@@ -174,10 +181,10 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
 
     arcsByPlateTrip = arcsByPlateTrip
       .withColumn("timedarcs", gatesPairsWithStartTimeUDF(col("arcs"), col("timestamps")))
-      .selectExpr("plate", "trip_id", "explode(timedarcs) as timedarc")
+      .selectExpr("plate", "tripid", "explode(timedarcs) as timedarc")
       .select(
         col("plate"),
-        col("trip_id"),
+        col("tripid"),
         col("timedarc._1._1").as("gatefrom"),
         col("timedarc._1._2").as("gateto"),
         col("timedarc._2._1").as("tstart"),
@@ -223,44 +230,75 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
 
     arcsByPlateTrip = joinArcExtraInfo(arcsByPlateTrip, arcsDF)
 
+    arcsByPlateTrip =
+      arcsByPlateTrip
+        .withColumn("segmentDist", abs(col("posto") - col("posfrom")))
+        .withColumn("segmentDuration", secDurationUDF(col("tstart"), col("tend")).cast(DoubleType) / 3600.0)
+        .withColumn("segmentSpeed", col("segmentDist") /  col("segmentDuration"))
+
     arcsByPlateTrip.show(false)
     arcsByPlateTrip.printSchema()
 
-/*
-    println(df.count)
+    var tripsStatsByPlate = arcsByPlateTrip.groupBy("plate", "tripid").agg(
+      sum("segmentDist").as("tripDist"),
+      sum("segmentDuration").as("tripDuration"),
+      (sum("segmentDist") / sum("segmentDuration")).as("tripSpeed")
+    )
 
-    df.columns.map(c => c -> df.na.drop(Array(c)).count()).foreach(println)
+    val timeInServiceAreaByPlateTrip = arcsByPlateTrip.filter("hasServiceArea").groupBy("plate", "tripid").agg(
+      sum("segmentDuration").as("totTimeServiceArea")
+    )
 
-    //df = df.na.fill("?", Array("nationality"))
+    tripsStatsByPlate = tripsStatsByPlate.join(
+      timeInServiceAreaByPlateTrip,
+      tripsStatsByPlate("plate") === timeInServiceAreaByPlateTrip("plate") &&
+        tripsStatsByPlate("tripid") === timeInServiceAreaByPlateTrip("tripid")
+    )
+    .drop(timeInServiceAreaByPlateTrip("plate"))
+    .drop(timeInServiceAreaByPlateTrip("tripid"))
 
-//    println(df.count)
+    tripsStatsByPlate.show(false)
 
-    df = df.filter(month(col("timestamp")) === 1)
-    df.show(false)
-*/
+    /*
+        println(df.count)
 
-    //TODO: to be assessed if after sessionization we still need a window-based analysis
+        df.columns.map(c => c -> df.na.drop(Array(c)).count()).foreach(println)
+
+        //df = df.na.fill("?", Array("nationality"))
+
+    //    println(df.count)
+
+        df = df.filter(month(col("timestamp")) === 1)
+        df.show(false)
+    */
+
+/*  --- not interesting after sessionization ---
     val windowDF = windowAnalysis(arcsByPlateTrip, gateColName = "gatefrom", timestampColName = "tstart")
 
     windowDF.show(false)
-
-    df.filter(col("plate").isNull).show(false)
-
-    df.filter(df.columns.map(col(_).isNull).reduce(_ or _)).show(false)
-/*
-    println("Count: " + df.count)
-    df = df.na.drop
-    println("Count after dropping nulls: " + df.count)
 */
-    val nationalityCount = df.groupBy("nationality").count
-    nationalityCount.show(false)
 
-    val dayOfWeekUDF = udf((ts: Timestamp) => new DateTime(ts).dayOfWeek.getAsString)
+    val nullValues = df.filter(df.columns.map(col(_).isNull).reduce(_ or _))
+    val anyNullCount = nullValues.count
+
+    if(anyNullCount > 0){
+      nullValues.show(false)
+      println("Count: " + df.count)
+      df = df.na.drop
+      println("Count after dropping nulls: " + df.count)
+    }
+
+    val dayOfWeekUDF = udf((ts: Timestamp) => new DateTime(ts).dayOfWeek.getAsString.toInt)
 
     df = df.withColumn("month", month(col("timestamp")))
            .withColumn("day", dayofmonth(col("timestamp")))
            .withColumn("hour", hour(col("timestamp")))
            .withColumn("dayofweek", dayOfWeekUDF(col("timestamp")))
+
+    val mostFreqValueUDF: UserDefinedFunction = udf {
+        (values: mutable.WrappedArray[Int]) =>
+          values.groupBy(identity).map(p => (p._1, p._2.size)).toSeq.maxBy(_._2)
+    }
 
     df = df.groupBy("plate").agg(
       first("nationality").as("nationality"),
@@ -272,14 +310,37 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
       countDistinct("hour").as("num_hours"),
       countDistinct("dayofweek").as("num_daysofweek"),
       countDistinct("timestamp").as("num_seen"),
-      min("month").as("min_month"),
-      max("month").as("max_month"),
-      unix_timestamp(min("timestamp")).as("min_time"),
-      unix_timestamp(max("timestamp")).as("max_time")
+      mostFreqValueUDF(sort_array(collect_list("hour"))).as("mostFreqHour"),
+      mostFreqValueUDF(sort_array(collect_list("dayofweek"))).as("mostFreqDayOfWeek")
     )
 
+/*
     df = df.join(windowDF, df("plate") === windowDF("plate"))
            .drop(windowDF("plate"))
+*/
+
+    val summaryByPlate = tripsStatsByPlate.groupBy("plate").agg(
+      min("tripDist").as("minTripDist"),
+      max("tripDist").as("maxTripDist"),
+      avg("tripDist").as("avgTripDist"),
+
+      min("tripDuration").as("minTripDuration"),
+      max("tripDuration").as("maxTripDuration"),
+      avg("tripDuration").as("avgTripDuration"),
+
+      min("tripSpeed").as("minTripSpeed"),
+      max("tripSpeed").as("maxTripSpeed"),
+      avg("tripSpeed").as("avgTripSpeed"),
+
+      min("totTimeServiceArea").as("minTotTimeServiceArea"),
+      max("totTimeServiceArea").as("maxTotTimeServiceArea"),
+      avg("totTimeServiceArea").as("avgTotTimeServiceArea")
+    )
+
+    df = df.join(summaryByPlate, df("plate") === summaryByPlate("plate"))
+           .drop(summaryByPlate("plate"))
+
+    df.show(false)
 
     val formula = new RFormula()
       .setFormula("label ~ .")
@@ -288,13 +349,13 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
     val vetorized = formula.fit(df).transform(df)
     vetorized.show(false)
 
-    computeClusters(vetorized, spark, "gmm")
     computeClusters(vetorized, spark, "kmeans")
+//    computeClusters(vetorized, spark, "gmm")
   }
 
   def computeKMeans(df: DataFrame,
                         numIterations: Int = 20,
-                        kVals: Seq[Int] = Seq(2, 3, 4, 5, 10, 20, 30, 40)): KMeansModel ={
+                        kVals: Seq[Int] = Seq(2, 4, 6, 8, 10, 12, 15, 20, 30, 45)): KMeansModel ={
 
     val Array(train, test) = df.randomSplit(Array(0.7, 0.3))
     val costs = kVals.map { k =>
@@ -306,6 +367,8 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
     }
     println("Clustering cross-validation:")
     costs.foreach { case (k, model, cost) => println(f"WCSS for K=$k id $cost%2.2f") }
+
+    visualize(costs.map(_._1.toDouble), costs.map(_._3))
 
     val best = costs.minBy(_._3)
     println("Best model with k = " + best._1)
@@ -320,7 +383,7 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper {
 
   def computeGMM(df: DataFrame,
                  numIterations: Int = 20,
-                 kVals: Seq[Int] = Seq(2, 3, 4, 5, 10, 20, 30, 40)): GaussianMixtureModel ={
+                 kVals: Seq[Int] = Seq(2, 4, 6, 8, 10, 12, 15, 20, 30, 40)): GaussianMixtureModel ={
 
     val Array(train, test) = df.randomSplit(Array(0.7, 0.3))
     val costs = kVals.map { k =>

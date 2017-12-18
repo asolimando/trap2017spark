@@ -12,6 +12,12 @@ import scala.annotation.tailrec
   * Created by ale on 17/12/17.
   */
 trait TimeHandling extends Serializable {
+
+  val secDurationUDF: UserDefinedFunction = {
+    udf((dt1: Timestamp, dt2: Timestamp) =>
+      dateTimesToDuration(new DateTime(dt1), new DateTime(dt2)).getStandardSeconds)
+  }
+
   def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
     udf((reqDates: Seq[Timestamp]) => {
       val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
