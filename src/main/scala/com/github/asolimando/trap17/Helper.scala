@@ -25,7 +25,7 @@ trait Helper {
   val GATES_DATA = "data/gates.csv"
   val ARCS_DATA = "data/arcs_closure.csv"
 
-  val CUT_TIME = 10
+  val CUT_TIME = 30 // minutes
 
   def writeParquet(df: DataFrame, path: String) = df.write.parquet(path)
 

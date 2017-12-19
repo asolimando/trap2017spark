@@ -82,9 +82,7 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper w
         getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
       }
 
-    df = df.filter(//month(col("timestamp")) === 1 and
-      col("plate") <= 10000)
-
+//    df = df.filter(col("plate") <= 10000)
 
     /********* LOAD DATASET GATES AND SEGMENTS *******************/
 
@@ -192,7 +190,7 @@ object TRAPSpark extends Helper with Sessionization with ETL with WindowHelper w
       )
 
     arcsByPlateTrip.show(false)
-    arcsByPlateTrip.printSchema()
+    arcsByPlateTrip.printSchema
 
     def joinArcExtraInfo(df: DataFrame, arcsDF: DataFrame): DataFrame = {
       val regularArcsJoinCond = df("gatefrom") === arcsDF("gatefrom") and df("gateto") === arcsDF("gateto")
