@@ -17,6 +17,8 @@ trait Helper {
 
   val FIXED_DATA = "data/fixed.parquet"
 
+  val VECTORIZED_DATA = "data/vectorized.parquet"
+
   val WHLOCATION = "spark-warehouse"
   val LOCALDIR = "tmpdir"
 
