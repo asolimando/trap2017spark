@@ -192,7 +192,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
           getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
         }
 
-      df = df.filter(col("plate") <= 100)
+//      df = df.filter(col("plate") <= 100)
 
       /********* LOAD DATASET GATES AND SEGMENTS *******************/
 
