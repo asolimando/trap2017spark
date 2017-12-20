@@ -34,6 +34,8 @@ object TRAPSpark extends Helper with ETL with VizHelper {
 
     val vectorized = getVectorizedDF(spark)
 
+    vectorized.show(false)
+
     computeClusters(vectorized, spark, "kmeans")
 //    computeClusters(vectorized, spark, "gmm")
   }

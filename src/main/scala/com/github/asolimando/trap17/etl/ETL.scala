@@ -6,7 +6,10 @@ import java.sql.Timestamp
 import com.github.asolimando.trap17.Helper
 import com.github.asolimando.trap17.analysis.sessionization.{Event, Sessionization, Trip}
 import com.github.asolimando.trap17.analysis.window.WindowHelper
+import org.apache.spark.ml.{Pipeline, PipelineStage}
 import org.apache.spark.ml.feature.RFormula
+import org.apache.spark.ml.feature.StandardScaler
+import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.DoubleType
@@ -101,6 +104,39 @@ trait ETL extends Helper with Sessionization with WindowHelper {
     }
   }
 
+  def applyPipelineStages(df: DataFrame, stages: Seq[PipelineStage]): DataFrame ={
+    val pipeline = new Pipeline().setStages(stages.toArray)
+    val model = pipeline.fit(df)
+    model.transform(df)
+  }
+
+  def normalize(df: DataFrame, numericCols: Seq[String]): DataFrame = {
+    val vectorizeCol = udf( (v: Double) => org.apache.spark.ml.linalg.Vectors.dense(Array(v)) )
+    val devectorizeCol = udf( (v: DenseVector) => v.apply(0) )
+
+    // Vectorize columns
+    var vectorizedDF =
+      numericCols.foldRight(df)((s: String, df: DataFrame) => df.withColumn(s, vectorizeCol(col(s))))
+
+    val scalers: Seq[PipelineStage] =
+      numericCols.map(
+        colName => new StandardScaler()
+          .setInputCol(colName)
+          .setOutputCol(colName + "_tmp")
+          .setWithStd(true)
+          .setWithMean(false)
+      )
+
+    vectorizedDF = applyPipelineStages(vectorizedDF, scalers)
+
+    vectorizedDF = numericCols.foldRight(vectorizedDF)((s: String, df: DataFrame) =>
+      df.drop(s).withColumnRenamed(s + "_tmp", s))
+
+    // Devectorize columns
+    numericCols.foldRight(vectorizedDF)((s: String, df: DataFrame) =>
+      df.withColumn(s, devectorizeCol(col(s))))
+  }
+
   def getVectorizedDF(spark: SparkSession) ={
 
     if(new File(VECTORIZED_DATA).isDirectory)
@@ -156,7 +192,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
           getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
         }
 
-      //    df = df.filter(col("plate") <= 10000)
+      df = df.filter(col("plate") <= 100)
 
       /********* LOAD DATASET GATES AND SEGMENTS *******************/
 
@@ -369,7 +405,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
 
       val mostFreqValueUDF: UserDefinedFunction = udf {
         (values: mutable.WrappedArray[Int]) =>
-          values.groupBy(identity).map(p => (p._1, p._2.size)).toSeq.maxBy(_._2)
+          values.groupBy(identity).map(p => (p._1, p._2.size)).toSeq.maxBy(_._2)._1
       }
 
       df = df.groupBy("plate").agg(
@@ -417,18 +453,33 @@ trait ETL extends Helper with Sessionization with WindowHelper {
 
       df.show(false)
 
-      // TODO: normalization needed before vectorization
+      df = normalize(df, getNumericColumns(df).filter(!_.equals("plate")))
+
+      df.show(false)
 
       val formula = new RFormula()
         .setFormula("label ~ .")
         .setFeaturesCol(FEATURES_COLNAME)
 
       val vectorized = formula.fit(df).transform(df)
-      vectorized.show(false)
 
       writeParquet(vectorized, VECTORIZED_DATA)
 
       vectorized
     }
+  }
+
+  def getNumericColumns(df: DataFrame): Seq[String] = {
+    val isNumeric: PartialFunction[(String, String), String] = {
+      case (name, "ByteType" |
+                  "DecimalType" |
+                  "DoubleType" |
+                  "FloatType" |
+                  "IntegerType" |
+                  "LongType" |
+                  "ShortType") => name
+    }
+
+    df.dtypes collect isNumeric
   }
 }
