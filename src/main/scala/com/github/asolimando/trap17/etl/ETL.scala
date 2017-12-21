@@ -449,8 +449,9 @@ trait ETL extends Helper with Sessionization with WindowHelper {
       )
 
       df = df.join(summaryByPlate, df("plate") === summaryByPlate("plate"))
-        .drop(summaryByPlate("plate"))
+        .drop(summaryByPlate("plate")).cache
 
+      println("#Plates: " + df.select("plate").distinct.count)
       df.show(false)
 
       df = normalize(df, getNumericColumns(df).filter(!_.equals("plate")))
@@ -465,7 +466,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
 
       writeParquet(vectorized, VECTORIZED_DATA)
 
-      vectorized
+      vectorized.cache
     }
   }
 
