@@ -23,6 +23,11 @@ import scala.collection.mutable
   */
 trait ETL extends Helper with Sessionization with WindowHelper {
 
+  /**
+    * Loading raw data
+    * @param spark spark session
+    * @return a dataframe with the raw data
+    */
   def getRawData(spark: SparkSession): DataFrame ={
     val parquetFile = new File(RAW_DATA)
 
@@ -43,6 +48,12 @@ trait ETL extends Helper with Sessionization with WindowHelper {
     readParquet(spark, RAW_DATA)
   }
 
+  /**
+    * Returns the dataframe with the information associated to plates having different nationalities in the dataset.
+    * @param spark the spark session
+    * @param df the data to process
+    * @return the dataframe with the information associated to plates having different nationalities in the dataset.
+    */
   def getMultinatDF(spark: SparkSession, df: DataFrame): DataFrame ={
     if(new File(MULTINAT_DATA).isDirectory)
       readParquet(spark, MULTINAT_DATA)
@@ -58,6 +69,12 @@ trait ETL extends Helper with Sessionization with WindowHelper {
     }
   }
 
+  /**
+    * Returns the dataframe containing spatial conflicts, that is, events for multiple vehicles at the same place and time.
+    * @param spark the spark session
+    * @param df the data to process
+    * @return the dataframe containing spatial conflicts, that is, events for multiple vehicles at the same place and time.
+    */
   def getSpatialConflictsDF(spark: SparkSession, df: DataFrame): DataFrame ={
     if(new File(CONFLICTS_DATA).isDirectory)
       readParquet(spark, CONFLICTS_DATA)
@@ -72,6 +89,14 @@ trait ETL extends Helper with Sessionization with WindowHelper {
     }
   }
 
+  /**
+    * Returns the subset of the data for different plates having multiple nationalities associated that can be fixed without
+    * ambiguity (that is, at most two distinct nationalities, one of them ''?'')
+    * @param spark the spark session
+    * @param df the data to process
+    * @return subset of the data for different plates having multiple nationalities associated that can be fixed without
+    * ambiguity (that is, at most two distinct nationalities, one of them ''?'')
+    */
   def getFixableMultiNatDF(spark: SparkSession, df: Dataset[Row]) ={
     val res = df.filter(col("num_nat") === 2 && array_contains(col("nats"),"?"))
       .withColumn("real_nat", col("nats")(1))
@@ -82,7 +107,14 @@ trait ETL extends Helper with Sessionization with WindowHelper {
     res
   }
 
-  def getFixedData(spark: SparkSession, df: DataFrame, fixableMultiNat: DataFrame, path: String) ={
+  /**
+    * Returns the sanitized data.
+    * @param spark the spark session
+    * @param df the input data to be processed
+    * @param fixableMultiNat the subset of data with multiple plates that can be sanitized
+    * @return the sanitized data.
+    */
+  def getFixedData(spark: SparkSession, df: DataFrame, fixableMultiNat: DataFrame) ={
     if(new File(FIXED_DATA).isDirectory)
       readParquet(spark, FIXED_DATA)
     else {
@@ -104,12 +136,24 @@ trait ETL extends Helper with Sessionization with WindowHelper {
     }
   }
 
+  /**
+    * Method applying a sequence of pipeline stages in order.
+    * @param df the input data to process.
+    * @param stages the sequence of stages to be applied.
+    * @return the data output of the stages application.
+    */
   def applyPipelineStages(df: DataFrame, stages: Seq[PipelineStage]): DataFrame ={
     val pipeline = new Pipeline().setStages(stages.toArray)
     val model = pipeline.fit(df)
     model.transform(df)
   }
 
+  /**
+    * Returns a dataframe where the numeric columns are normalized (standard scaling).
+    * @param df the input data
+    * @param numericCols the numeric columns
+    * @return a dataframe where the numeric columns are normalized (standard scaling).
+    */
   def normalize(df: DataFrame, numericCols: Seq[String]): DataFrame = {
     val vectorizeCol = udf( (v: Double) => org.apache.spark.ml.linalg.Vectors.dense(Array(v)) )
     val devectorizeCol = udf( (v: DenseVector) => v.apply(0) )
@@ -137,6 +181,11 @@ trait ETL extends Helper with Sessionization with WindowHelper {
       df.withColumn(s, devectorizeCol(col(s))))
   }
 
+  /**
+    * Builds a vectorized version of the dataset.
+    * @param spark the spark session
+    * @return a vectorized version of the dataset.
+    */
   def getVectorizedDF(spark: SparkSession) ={
 
     if(new File(VECTORIZED_DATA).isDirectory)
@@ -189,14 +238,14 @@ trait ETL extends Helper with Sessionization with WindowHelper {
 
           fixableMultiNat.show(false)
 
-          getFixedData(spark, df, fixableMultiNat, FIXED_DATA)
+          getFixedData(spark, df, fixableMultiNat)
         }
 
 //      df = df.filter(col("plate") <= 100)
 
       /********* LOAD DATASET GATES AND SEGMENTS *******************/
 
-      // enrich segments with the information of the gates at their extremities
+      // enrich segments (arcs) with the information of the gates at their extremities
       val gfrom = readCSV(spark, GATES_DATA)
         .withColumnRenamed("gateid", "gateid_from")
         .withColumnRenamed("pos", "pos_from")
@@ -241,6 +290,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
 
       println("Dataset size: " + df.count)
 
+      // method definying which pair of events are eligible as split points for sessionization
       val validTripCutSegments: Set[(Int, Int)] =
         arcsDF.filter(!col("hasServiceArea") && col("hasEntryExit")).rdd.map(r => (r.getInt(0), r.getInt(1))).collect.toSet
 
@@ -347,6 +397,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
       arcsByPlateTrip.show(false)
       arcsByPlateTrip.printSchema()
 
+      // summary single trip statistics by plate
       var tripsStatsByPlate = arcsByPlateTrip.groupBy("plate", "tripid").agg(
         sum("segmentDist").as("tripDist"),
         sum("segmentDuration").as("tripDuration"),
@@ -408,6 +459,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
           values.groupBy(identity).map(p => (p._1, p._2.size)).toSeq.maxBy(_._2)._1
       }
 
+      // derive "global features" for a single plate (not considering the single trips)
       df = df.groupBy("plate").agg(
         first("nationality").as("nationality"),
         countDistinct("gate").as("num_gates"),
@@ -428,6 +480,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
                  .drop(windowDF("plate"))
       */
 
+      // derive features summarizing the behaviour of a single plate in terms of its trips
       val summaryByPlate = tripsStatsByPlate.groupBy("plate").agg(
         min("tripDist").as("minTripDist"),
         max("tripDist").as("maxTripDist"),
@@ -448,6 +501,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
         countDistinct("tripid").as("numtrips")
       )
 
+      //merge features at dataset level and trip level
       df = df.join(summaryByPlate, df("plate") === summaryByPlate("plate"))
         .drop(summaryByPlate("plate")).cache
 
@@ -458,6 +512,7 @@ trait ETL extends Helper with Sessionization with WindowHelper {
 
       df.show(false)
 
+      // encode the dataframe using RFormula
       val formula = new RFormula()
         .setFormula("label ~ .")
         .setFeaturesCol(FEATURES_COLNAME)
@@ -470,6 +525,11 @@ trait ETL extends Helper with Sessionization with WindowHelper {
     }
   }
 
+  /**
+    * Returns the name of the columns in the dataframe ''df'' which are numeric.
+    * @param df the input dataframe
+    * @return the name of the columns in the dataframe ''df'' which are numeric.
+    */
   def getNumericColumns(df: DataFrame): Seq[String] = {
     val isNumeric: PartialFunction[(String, String), String] = {
       case (name, "ByteType" |

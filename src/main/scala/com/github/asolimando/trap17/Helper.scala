@@ -33,6 +33,10 @@ trait Helper {
 
   def readParquet(spark: SparkSession, path: String): DataFrame = spark.read.parquet(path)
 
+  def getBaseModelPath(algoName: String, k: Int) = "data/model/" + algoName + "_" + k + ".model"
+
+  def getAnomaliesPath(algoName: String, k: Int) = "data/anomalies_" + algoName + "_" + k + ".parquet"
+
   def readCSV(spark: SparkSession, path: String): DataFrame =
     spark
       .read

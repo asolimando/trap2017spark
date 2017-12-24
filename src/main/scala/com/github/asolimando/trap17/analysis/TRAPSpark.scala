@@ -1,27 +1,14 @@
 package com.github.asolimando.trap17.analysis
 
-import java.io.File
-import java.sql.Timestamp
-
 import com.github.asolimando.trap17._
-import com.github.asolimando.trap17.analysis.window.WindowHelper
-import com.github.asolimando.trap17.analysis.sessionization.{Event, Sessionization, Trip}
 import com.github.asolimando.trap17.etl.ETL
-import com.github.asolimando.trap17.graph.{GateProperty, HighwayGraph, SegmentProperty}
 import com.github.asolimando.trap17.visualization.VizHelper
+import org.apache.spark.ml.{Model, Transformer}
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
-import org.apache.spark.ml.feature.RFormula
-import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.graphx.{Edge, Graph, VertexId}
-import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.api.java.UDF1
-import org.apache.spark.sql.expressions.UserDefinedFunction
-import org.apache.spark.sql.types.DoubleType
-import org.joda.time.DateTime
 
-import scala.collection.mutable
+import scala.reflect.io.File
 
 /**
   * Created by ale on 17/12/17.
@@ -36,81 +23,94 @@ object TRAPSpark extends Helper with ETL with VizHelper {
 
     vectorized.show(false)
 
-    computeClusters(vectorized, spark, "kmeans")
-//    computeClusters(vectorized, spark, "gmm")
+    val numSamples = vectorized.count
+
+    //computeClusters(vectorized, spark, "kmeans")
+    val models = computeClusters(vectorized, spark, "gmm")
+
+    models.foreach{
+      m =>
+        val clust_df = m._3.transform(vectorized)
+        val clustsize: DataFrame = clust_df.groupBy("prediction").count
+
+        clustsize.show(false)
+
+        val clusterIDoutlier = clustsize.filter(col("count") / numSamples < 0.05)
+          .select("prediction")
+          .collect
+          .map(r => r.getInt(0))
+
+        val anomalies = clust_df.filter(col("prediction").isin(clusterIDoutlier:_*)).orderBy("prediction")
+
+        anomalies.write.save(getAnomaliesPath(m._1, m._2))
+    }
+  }
+
+  def showAnomalies(df: DataFrame, modelPath: String): Unit ={
+
   }
 
   def computeKMeans(df: DataFrame,
                         numIterations: Int = 20,
-                        kVals: Seq[Int] = Seq(2, 4, 6, 8, 10, 12, 15, 20, 30, 45)): KMeansModel ={
+                        kVals: Seq[Int] = Seq(2, 4, 6, 8, 10, 12, 15, 20, 30, 45)): Seq[(String, Int, KMeansModel)] ={
 
     val Array(train, test) = df.randomSplit(Array(0.7, 0.3))
-    val costs = kVals.map { k =>
-      val model = new KMeans()
-        .setK(k)
-        .setMaxIter(numIterations)
-        .fit(train)
-      (k, model, model.computeCost(test))
+
+    val models = kVals.map { k =>
+      val model =
+        if(File(getBaseModelPath("kmeans", k)).isDirectory){
+          KMeansModel.read.load(getBaseModelPath("kmeans", k))
+        }
+        else {
+          new KMeans()
+            .setK(k)
+            .setMaxIter(numIterations)
+            .fit(train)
+        }
+
+      val cost = model.computeCost(test)
+      println(f"WCSS for K=$k id $cost%2.2f")
+
+//      Try(println("Summary = " + model.summary.clusterSizes.mkString(", ")))
+
+      model.write.overwrite.save(getBaseModelPath("kmeans", k))
+
+      (k, model, cost)
     }
-    println("Clustering cross-validation:")
-    costs.foreach { case (k, model, cost) => println(f"WCSS for K=$k id $cost%2.2f") }
 
-    visualize(costs.map(_._1.toDouble), costs.map(_._3))
+    visualize(models.map(_._1.toDouble), models.map(_._3))
 
-    val best = costs.minBy(_._3)
-    println("Best model with k = " + best._1)
-
-    val bestModel = best._2
-
-    println("Cost = " + bestModel.computeCost(df) + "\n" +
-      "Summary = " + bestModel.summary.clusterSizes.mkString(", "))
-
-    bestModel
+    models.map(t => ("kmeans", t._1, t._2))
   }
 
   def computeGMM(df: DataFrame,
                  numIterations: Int = 20,
-                 kVals: Seq[Int] = Seq(2, 4, 6, 8, 10, 12, 15, 20, 30, 40)): GaussianMixtureModel ={
+                 kVals: Seq[Int] = Seq(2, 4, 6, 8, 10, 12, 15, 20, 30, 40)): Seq[(String, Int, GaussianMixtureModel)] ={
 
-    val Array(train, test) = df.randomSplit(Array(0.7, 0.3))
-    val costs = kVals.map { k =>
-      val model = new GaussianMixture()
-        .setK(k)
-        .setMaxIter(numIterations)
-        .fit(train)
+    val models = kVals.map { k =>
+      val model =
+        if(File(getBaseModelPath("gmm", k)).isDirectory){
+          GaussianMixtureModel.read.load(getBaseModelPath("gmm", k))
+        }
+        else {
+          new GaussianMixture()
+            .setK(k)
+            .setMaxIter(numIterations)
+            .fit(df)
+        }
 
-      def getProbPredUDF = udf((pred: Int, probs: DenseVector) => probs.values(pred))
-
-      val avgConfidence = model.transform(test)
-        .withColumn("prob_pred", getProbPredUDF(col(model.getPredictionCol), col(model.getProbabilityCol)))
-        .groupBy()
-        .agg(avg("prob_pred"))
-        .head.getDouble(0)
-
-      (model.summary.k, model, avgConfidence)
+      model.write.overwrite.save(getBaseModelPath("gmm", k))
+      ("gmm", k, model)
     }
-    println("Clustering cross-validation:")
-    costs.foreach { case (k, model, avgConf) => println(f"AvgConfidence for K=$k $avgConf%2.2f") }
 
-    val best = costs.maxBy(_._3)
-    println("Best model with k = " + best._1)
-
-    val bestModel = best._2
-
-    println("AVG Confidence= " + best._3 + "\n" +
-      "Summary = " + bestModel.summary.clusterSizes.mkString(", "))
-
-    bestModel
+    models
   }
 
-  def computeClusters(df: DataFrame, spark: SparkSession, algo: String) = {
-
-    val model = algo match {
-      case "kmeans" => computeKMeans(df)
-      case "gmm" => computeGMM(df)
+  def computeClusters(df: DataFrame, spark: SparkSession, algo: String, kVals: Seq[Int] = Seq()): Seq[(String, Int, Transformer)] = {
+    algo match {
+      case "kmeans" => if(kVals.isEmpty) computeKMeans(df) else computeKMeans(df, kVals = kVals)
+      case "gmm" => if(kVals.isEmpty) computeGMM(df) else computeGMM(df, kVals = kVals)
     }
-
-    model.write.overwrite.save("data/model/" + algo + ".model")
   }
 
 }
