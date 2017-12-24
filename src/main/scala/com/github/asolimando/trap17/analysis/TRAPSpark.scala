@@ -3,7 +3,7 @@ package com.github.asolimando.trap17.analysis
 import com.github.asolimando.trap17._
 import com.github.asolimando.trap17.etl.ETL
 import com.github.asolimando.trap17.visualization.VizHelper
-import org.apache.spark.ml.{Model, Transformer}
+import org.apache.spark.ml.Transformer
 import org.apache.spark.ml.clustering.{GaussianMixture, GaussianMixtureModel, KMeans, KMeansModel}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -46,10 +46,6 @@ object TRAPSpark extends Helper with ETL with VizHelper {
     }
   }
 
-  def showAnomalies(df: DataFrame, modelPath: String): Unit ={
-
-  }
-
   def computeKMeans(df: DataFrame,
                         numIterations: Int = 20,
                         kVals: Seq[Int] = Seq(2, 4, 6, 8, 10, 12, 15, 20, 30, 45)): Seq[(String, Int, KMeansModel)] ={
@@ -71,13 +67,12 @@ object TRAPSpark extends Helper with ETL with VizHelper {
       val cost = model.computeCost(test)
       println(f"WCSS for K=$k id $cost%2.2f")
 
-//      Try(println("Summary = " + model.summary.clusterSizes.mkString(", ")))
-
       model.write.overwrite.save(getBaseModelPath("kmeans", k))
 
       (k, model, cost)
     }
 
+    // visualization of the cost for elbow-rules determination of k
     visualize(models.map(_._1.toDouble), models.map(_._3))
 
     models.map(t => ("kmeans", t._1, t._2))

@@ -18,6 +18,11 @@ trait TimeHandling extends Serializable {
       dateTimesToDuration(new DateTime(dt1), new DateTime(dt2)).getStandardSeconds)
   }
 
+  /**
+    * Returns an UDF computing the average of a sequence of durations.
+    * @param diff a function extracting the duration (at the sought temporal granularity)
+    * @return an UDF computing the average of a sequence of durations.
+    */
   def retrieveGetAvgDurationUDF(diff: Duration => Long): UserDefinedFunction = {
     udf((reqDates: Seq[Timestamp]) => {
       val timeDiffList = datesDifference(reqDates.map(new DateTime(_)).toList, diff)
@@ -34,6 +39,12 @@ trait TimeHandling extends Serializable {
   def avgHoursDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardHours)
   def avgSecondsDifferenceUDF = retrieveGetAvgDurationUDF((x:Duration) => x.getStandardSeconds)
 
+  /**
+    * Returns a list of time differences between consecutive times.
+    * @param dates the dates to be analyzed.
+    * @param diff the differencing function.
+    * @return a list of time differences between consecutive times.
+    */
   def datesDifference(dates: List[DateTime], diff: Duration => Long): List[Long] = {
     @tailrec
     def iter(dates: List[DateTime], acc: List[Long]): List[Long] = dates match {
@@ -44,5 +55,11 @@ trait TimeHandling extends Serializable {
     iter(dates, Nil)
   }
 
+  /**
+    * Converting a pair of datetime to the equivalent duration between them.
+    * @param dt1 the first datetime
+    * @param dt2 the second datetime
+    * @return the duration between two datetimes.
+    */
   def dateTimesToDuration(dt1: DateTime, dt2: DateTime): Duration = new Duration(dt1, dt2)
 }
