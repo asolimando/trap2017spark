@@ -290,12 +290,18 @@ trait ETL extends Helper with Sessionization with WindowHelper {
 
       println("Dataset size: " + df.count)
 
-      // method definying which pair of events are eligible as split points for sessionization
-      val validTripCutSegments: Set[(Int, Int)] =
-        arcsDF.filter(!col("hasServiceArea") && col("hasEntryExit")).rdd.map(r => (r.getInt(0), r.getInt(1))).collect.toSet
+      val legalSegments: Set[(Int, Int)] = arcsDF
+        .rdd.map(r => (r.getInt(0), r.getInt(1)))
+        .collect.toSet
 
+      val validTripCutSegments: Set[(Int, Int)] = arcsDF
+        .filter(!col("hasServiceArea") && col("hasEntryExit"))
+        .rdd.map(r => (r.getInt(0), r.getInt(1)))
+        .collect.toSet
+
+      // method defining which pair of events are not eligible as split points for sessionization
       val soundSplitTestFunc:((Event, Event) => Boolean) =
-        splitFuncIfEligible(tripSplitEligibilityTest(validTripCutSegments))(tripSplitFunc)
+        splitFuncIfEligible(isSegmentMatchingGates(legalSegments, true))(isSegmentMatchingGates(validTripCutSegments))(tripSplitFunc)
 
       val nationalityCount = df.groupBy("nationality").count
       nationalityCount.show(false)

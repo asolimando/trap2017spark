@@ -42,6 +42,7 @@ object TRAPSpark extends Helper with ETL with VizHelper {
 
         val anomalies = clust_df.filter(col("prediction").isin(clusterIDoutlier:_*)).orderBy("prediction")
 
+        saveCSV(anomalies, getAnomaliesPath(m._1, m._2))
         anomalies.write.save(getAnomaliesPath(m._1, m._2))
     }
   }
